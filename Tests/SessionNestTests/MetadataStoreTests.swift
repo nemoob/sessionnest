@@ -1,0 +1,419 @@
+import Foundation
+import SQLite3
+import Testing
+
+@testable import SessionNest
+
+@Test func metadataPersistsFavoritesCollectionsAndTags() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+
+    let collection = try await store.createCollection(name: "Sample Work")
+    let tag = try await store.createTag(name: "Bug Fix", colorHex: "#B66B52")
+    try await store.setFavorite(threadID: "t1", isFavorite: true)
+    try await store.assign(threadID: "t1", collectionID: collection.id)
+    try await store.setTags(threadID: "t1", tagIDs: [tag.id])
+
+    let metadata = try await store.loadMetadata()
+    let tagIDs = try await store.loadThreadTags()
+    let collections = try await store.loadCollections()
+    let tags = try await store.loadTags()
+    #expect(
+        metadata["t1"]
+            == ThreadMetadata(threadID: "t1", isFavorite: true, collectionID: collection.id))
+    #expect(tagIDs["t1"] == [tag.id])
+    #expect(collections == [collection])
+    #expect(tags == [tag])
+}
+
+@Test func projectCachePersistsKnownAndUnknownResults() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+
+    try await store.saveThreadProject(
+        ThreadProjectCache(
+            threadID: "known", projectPath: "/work/codex/sample-app", analyzedUpdatedAt: 10
+        ))
+    try await store.saveThreadProject(
+        ThreadProjectCache(
+            threadID: "unknown", projectPath: nil, analyzedUpdatedAt: 20
+        ))
+
+    let projects = try await store.loadThreadProjects()
+    #expect(projects["known"]?.projectPath == "/work/codex/sample-app")
+    #expect(
+        projects["unknown"]
+            == ThreadProjectCache(
+                threadID: "unknown", projectPath: nil, analyzedUpdatedAt: 20
+            ))
+}
+
+@Test func projectCacheDoesNotOverwriteNewerAnalysisWithStaleResult() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+
+    try await store.saveThreadProject(
+        ThreadProjectCache(
+            threadID: "known", projectPath: "/work/codex/newer", analyzedUpdatedAt: 20
+        ))
+    try await store.saveThreadProject(
+        ThreadProjectCache(
+            threadID: "known", projectPath: "/work/codex/stale", analyzedUpdatedAt: 10
+        ))
+
+    #expect(
+        try await store.loadThreadProjects()["known"]
+            == ThreadProjectCache(
+                threadID: "known", projectPath: "/work/codex/newer", analyzedUpdatedAt: 20
+            ))
+}
+
+@Test func tokenUsageCachePersistsAppendAndRebuild() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+    let zeroDay: Int64 = 1_752_336_000
+    let firstDay: Int64 = 1_752_422_400
+    let secondDay: Int64 = 1_752_508_800
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/first.jsonl",
+        fileSize: 400,
+        fileModificationTimeNS: 500,
+        parserVersion: 1,
+        result: tokenScanResult(
+            offset: 350,
+            maximum: tokenUsage(100, 60, 30, 20, 130),
+            dailyUsage: [
+                zeroDay: .zero,
+                firstDay: tokenUsage(40, 30, 10, 5, 50),
+                secondDay: tokenUsage(60, 30, 20, 15, 80),
+            ],
+            latestEventTimestamp: nil
+        ),
+        rebuild: false
+    )
+
+    #expect(
+        try await store.loadThreadTokenCache()["measured"]
+            == ThreadTokenCache(
+                threadID: "measured",
+                rolloutPath: "/rollout/first.jsonl",
+                fileSize: 400,
+                fileModificationTimeNS: 500,
+                scannedOffset: 350,
+                maximum: tokenUsage(100, 60, 30, 20, 130),
+                latestEventTimestamp: nil,
+                parserVersion: 1
+            ))
+    #expect(
+        try await store.loadThreadTokenDailyUsage() == [
+            ThreadTokenDailyUsage(
+                threadID: "measured",
+                dayStart: firstDay,
+                usage: tokenUsage(40, 30, 10, 5, 50)
+            ),
+            ThreadTokenDailyUsage(
+                threadID: "measured",
+                dayStart: secondDay,
+                usage: tokenUsage(60, 30, 20, 15, 80)
+            ),
+        ])
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/first.jsonl",
+        fileSize: 600,
+        fileModificationTimeNS: 700,
+        parserVersion: 1,
+        result: tokenScanResult(
+            offset: 550,
+            maximum: tokenUsage(125, 70, 40, 25, 165),
+            dailyUsage: [secondDay: tokenUsage(25, 10, 10, 5, 35)],
+            latestEventTimestamp: 1_752_560_000
+        ),
+        rebuild: false
+    )
+
+    #expect(
+        try await store.loadThreadTokenCache()["measured"]
+            == ThreadTokenCache(
+                threadID: "measured",
+                rolloutPath: "/rollout/first.jsonl",
+                fileSize: 600,
+                fileModificationTimeNS: 700,
+                scannedOffset: 550,
+                maximum: tokenUsage(125, 70, 40, 25, 165),
+                latestEventTimestamp: 1_752_560_000,
+                parserVersion: 1
+            ))
+    #expect(
+        try await store.loadThreadTokenDailyUsage() == [
+            ThreadTokenDailyUsage(
+                threadID: "measured",
+                dayStart: firstDay,
+                usage: tokenUsage(40, 30, 10, 5, 50)
+            ),
+            ThreadTokenDailyUsage(
+                threadID: "measured",
+                dayStart: secondDay,
+                usage: tokenUsage(85, 40, 30, 20, 115)
+            ),
+        ])
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/rebuilt.jsonl",
+        fileSize: 200,
+        fileModificationTimeNS: 800,
+        parserVersion: 2,
+        result: tokenScanResult(
+            offset: 190,
+            maximum: tokenUsage(10, 4, 3, 2, 13),
+            dailyUsage: [secondDay: tokenUsage(10, 4, 3, 2, 13)],
+            latestEventTimestamp: 1_752_570_000
+        ),
+        rebuild: true
+    )
+
+    #expect(
+        try await store.loadThreadTokenCache()["measured"]
+            == ThreadTokenCache(
+                threadID: "measured",
+                rolloutPath: "/rollout/rebuilt.jsonl",
+                fileSize: 200,
+                fileModificationTimeNS: 800,
+                scannedOffset: 190,
+                maximum: tokenUsage(10, 4, 3, 2, 13),
+                latestEventTimestamp: 1_752_570_000,
+                parserVersion: 2
+            ))
+    #expect(
+        try await store.loadThreadTokenDailyUsage() == [
+            ThreadTokenDailyUsage(
+                threadID: "measured",
+                dayStart: secondDay,
+                usage: tokenUsage(10, 4, 3, 2, 13)
+            )
+        ])
+}
+
+@Test func tokenUsageCacheDoesNotFabricateUncoveredThreads() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+
+    #expect(try await store.loadThreadTokenCache().isEmpty)
+    #expect(try await store.loadThreadTokenDailyUsage().isEmpty)
+}
+
+@Test func tokenUsageUnobservedAppendDoesNotCreateOrOverwriteCache() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+    let day: Int64 = 1_752_422_400
+
+    try await store.saveThreadTokenScan(
+        threadID: "uncovered",
+        rolloutPath: "/rollout/empty.jsonl",
+        fileSize: 100,
+        fileModificationTimeNS: 200,
+        parserVersion: 1,
+        result: tokenScanResult(
+            offset: 90,
+            maximum: .zero,
+            dailyUsage: [:],
+            latestEventTimestamp: nil,
+            observedCheckpoint: false
+        ),
+        rebuild: false
+    )
+
+    #expect(try await store.loadThreadTokenCache().isEmpty)
+    #expect(try await store.loadThreadTokenDailyUsage().isEmpty)
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/original.jsonl",
+        fileSize: 300,
+        fileModificationTimeNS: 400,
+        parserVersion: 1,
+        result: tokenScanResult(
+            offset: 250,
+            maximum: tokenUsage(10, 5, 2, 1, 12),
+            dailyUsage: [day: tokenUsage(10, 5, 2, 1, 12)],
+            latestEventTimestamp: 1_752_430_000
+        ),
+        rebuild: false
+    )
+    let originalCache = try await store.loadThreadTokenCache()
+    let originalDailyUsage = try await store.loadThreadTokenDailyUsage()
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/ignored.jsonl",
+        fileSize: 500,
+        fileModificationTimeNS: 600,
+        parserVersion: 2,
+        result: tokenScanResult(
+            offset: 450,
+            maximum: tokenUsage(99, 88, 77, 66, 176),
+            dailyUsage: [day: tokenUsage(99, 88, 77, 66, 176)],
+            latestEventTimestamp: 1_752_440_000,
+            observedCheckpoint: false
+        ),
+        rebuild: false
+    )
+
+    #expect(try await store.loadThreadTokenCache() == originalCache)
+    #expect(try await store.loadThreadTokenDailyUsage() == originalDailyUsage)
+}
+
+@Test func tokenUsageUnobservedRebuildRemovesExistingCache() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/original.jsonl",
+        fileSize: 300,
+        fileModificationTimeNS: 400,
+        parserVersion: 1,
+        result: tokenScanResult(
+            offset: 250,
+            maximum: tokenUsage(10, 5, 2, 1, 12),
+            dailyUsage: [1_752_422_400: tokenUsage(10, 5, 2, 1, 12)],
+            latestEventTimestamp: 1_752_430_000
+        ),
+        rebuild: false
+    )
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/rebuilt.jsonl",
+        fileSize: 100,
+        fileModificationTimeNS: 500,
+        parserVersion: 2,
+        result: tokenScanResult(
+            offset: 90,
+            maximum: .zero,
+            dailyUsage: [:],
+            latestEventTimestamp: nil,
+            observedCheckpoint: false
+        ),
+        rebuild: true
+    )
+
+    #expect(try await store.loadThreadTokenCache().isEmpty)
+    #expect(try await store.loadThreadTokenDailyUsage().isEmpty)
+}
+
+@Test func tokenUsageScanRollsBackSummaryWhenDailyWriteFails() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    let store = try MetadataStore(databaseURL: databaseURL)
+    let originalDay: Int64 = 1_752_422_400
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/original.jsonl",
+        fileSize: 100,
+        fileModificationTimeNS: 200,
+        parserVersion: 1,
+        result: tokenScanResult(
+            offset: 90,
+            maximum: tokenUsage(10, 5, 2, 1, 12),
+            dailyUsage: [originalDay: tokenUsage(10, 5, 2, 1, 12)],
+            latestEventTimestamp: 1_752_430_000
+        ),
+        rebuild: false
+    )
+    let originalCache = try await store.loadThreadTokenCache()
+    let originalDailyUsage = try await store.loadThreadTokenDailyUsage()
+    try executeSQLite(
+        """
+        CREATE TRIGGER fail_token_daily
+        BEFORE INSERT ON thread_token_daily
+        BEGIN
+          SELECT RAISE(ABORT, 'forced daily failure');
+        END;
+        """,
+        at: databaseURL
+    )
+
+    do {
+        try await store.saveThreadTokenScan(
+            threadID: "measured",
+            rolloutPath: "/rollout/rebuilt.jsonl",
+            fileSize: 300,
+            fileModificationTimeNS: 400,
+            parserVersion: 2,
+            result: tokenScanResult(
+                offset: 250,
+                maximum: tokenUsage(20, 10, 4, 2, 24),
+                dailyUsage: [1_752_508_800: tokenUsage(20, 10, 4, 2, 24)],
+                latestEventTimestamp: 1_752_520_000
+            ),
+            rebuild: true
+        )
+        Issue.record("Expected daily write failure")
+    } catch {
+        #expect(error is MetadataStoreError)
+    }
+
+    #expect(try await store.loadThreadTokenCache() == originalCache)
+    #expect(try await store.loadThreadTokenDailyUsage() == originalDailyUsage)
+}
+
+private func tokenUsage(
+    _ inputTokens: Int64,
+    _ cachedInputTokens: Int64,
+    _ outputTokens: Int64,
+    _ reasoningOutputTokens: Int64,
+    _ totalTokens: Int64
+) -> TokenUsageBreakdown {
+    TokenUsageBreakdown(
+        inputTokens: inputTokens,
+        cachedInputTokens: cachedInputTokens,
+        outputTokens: outputTokens,
+        reasoningOutputTokens: reasoningOutputTokens,
+        totalTokens: totalTokens
+    )
+}
+
+private func tokenScanResult(
+    offset: Int64,
+    maximum: TokenUsageBreakdown,
+    dailyUsage: [Int64: TokenUsageBreakdown],
+    latestEventTimestamp: Int64?,
+    observedCheckpoint: Bool = true
+) -> TokenScanResult {
+    TokenScanResult(
+        offset: offset,
+        state: TokenScanState(
+            maximum: maximum,
+            dailyUsage: dailyUsage,
+            latestEventTimestamp: latestEventTimestamp,
+            observedCheckpoint: observedCheckpoint
+        )
+    )
+}
+
+private func executeSQLite(_ sql: String, at databaseURL: URL) throws {
+    var database: OpaquePointer?
+    guard sqlite3_open(databaseURL.path, &database) == SQLITE_OK, let database else {
+        throw MetadataStoreError.sqlite("Unable to open test database")
+    }
+    defer { sqlite3_close(database) }
+    guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+        throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+    }
+}

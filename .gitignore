@@ -1,0 +1,17 @@
+.build/
+.swiftpm/
+dist/
+.superpowers/
+.worktrees/
+.DS_Store
+.env
+.env.*
+*.sqlite
+*.sqlite-*
+*.db
+*.log
+*.jsonl
+*.pem
+*.p12
+*.cer
+*.mobileprovision
