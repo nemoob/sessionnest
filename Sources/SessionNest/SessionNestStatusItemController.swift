@@ -27,7 +27,7 @@ enum SessionNestStatusLabelLayout {
     static let statusItemLength: CGFloat = 68
     static let horizontalInset: CGFloat = 3
     static let ringDiameter: CGFloat = 14
-    static let ringLineWidth: CGFloat = 3
+    static let ringLineWidth: CGFloat = 4
     static let ringLineCap: CGLineCap = .butt
     static let spacing: CGFloat = 4
     static let fontSize: CGFloat = 8

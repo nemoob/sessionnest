@@ -1,6 +1,11 @@
 import Charts
 import SwiftUI
 
+enum SessionNestPublicLinkIcon: Equatable {
+    case system(String)
+    case github
+}
+
 enum SessionNestPublicLink: CaseIterable, Hashable {
     case website
     case repository
@@ -19,11 +24,224 @@ enum SessionNestPublicLink: CaseIterable, Hashable {
         }
     }
 
-    var systemImage: String {
+    var icon: SessionNestPublicLinkIcon {
         switch self {
-        case .website: "globe"
-        case .repository: "chevron.left.forwardslash.chevron.right"
+        case .website: .system("safari")
+        case .repository: .github
         }
+    }
+}
+
+enum SessionNestStatusPopoverHeaderLayout {
+    static let buttonDiameter: CGFloat = 30
+    static let iconSize: CGFloat = 16
+    static let dividerHeight: CGFloat = 18
+}
+
+private struct StatusPopoverHeaderButton<Label: View>: View {
+    let title: String
+    let isEnabled: Bool
+    let action: () -> Void
+    let label: Label
+    @State private var isHovered = false
+
+    init(
+        title: String,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void,
+        @ViewBuilder label: () -> Label
+    ) {
+        self.title = title
+        self.isEnabled = isEnabled
+        self.action = action
+        self.label = label()
+    }
+
+    var body: some View {
+        Button(action: action) {
+            label
+                .frame(
+                    width: SessionNestStatusPopoverHeaderLayout.iconSize,
+                    height: SessionNestStatusPopoverHeaderLayout.iconSize
+                )
+        }
+        .buttonStyle(StatusPopoverHeaderButtonStyle(isHovered: isHovered))
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.35)
+        .onHover { isHovered = $0 }
+        .help(title)
+        .accessibilityLabel(title)
+    }
+}
+
+private struct StatusPopoverHeaderButtonStyle: ButtonStyle {
+    let isHovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(
+                width: SessionNestStatusPopoverHeaderLayout.buttonDiameter,
+                height: SessionNestStatusPopoverHeaderLayout.buttonDiameter
+            )
+            .background {
+                Circle()
+                    .fill(
+                        Color.primary.opacity(
+                            configuration.isPressed ? 0.16 : isHovered ? 0.08 : 0
+                        )
+                    )
+            }
+            .contentShape(Circle())
+    }
+}
+
+private struct GitHubMarkShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let scale = min(rect.width / 98, rect.height / 96)
+        let origin = CGPoint(
+            x: rect.midX - 49 * scale,
+            y: rect.midY - 48 * scale
+        )
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: origin.x + x * scale, y: origin.y + y * scale)
+        }
+
+        var path = Path()
+        path.move(to: point(41.4395, 69.3848))
+        path.addCurve(
+            to: point(19.9062, 46.9902),
+            control1: point(28.8066, 67.8535),
+            control2: point(19.9062, 58.7617)
+        )
+        path.addCurve(
+            to: point(24.5, 33.5918),
+            control1: point(19.9062, 42.2051),
+            control2: point(21.6289, 37.0371)
+        )
+        path.addCurve(
+            to: point(24.8828, 20.959),
+            control1: point(23.2559, 30.4336),
+            control2: point(23.4473, 23.7344)
+        )
+        path.addCurve(
+            to: point(36.9414, 25.2656),
+            control1: point(28.7109, 20.4805),
+            control2: point(33.8789, 22.4902)
+        )
+        path.addCurve(
+            to: point(49.0957, 23.543),
+            control1: point(40.5781, 24.1172),
+            control2: point(44.4062, 23.543)
+        )
+        path.addCurve(
+            to: point(61.0586, 25.1699),
+            control1: point(53.7852, 23.543),
+            control2: point(57.6133, 24.1172)
+        )
+        path.addCurve(
+            to: point(73.1172, 20.959),
+            control1: point(64.0254, 22.4902),
+            control2: point(69.2891, 20.4805)
+        )
+        path.addCurve(
+            to: point(73.4043, 33.4961),
+            control1: point(74.457, 23.543),
+            control2: point(74.6484, 30.2422)
+        )
+        path.addCurve(
+            to: point(78.0937, 46.9902),
+            control1: point(76.4668, 37.1328),
+            control2: point(78.0937, 42.0137)
+        )
+        path.addCurve(
+            to: point(56.3691, 69.2891),
+            control1: point(78.0937, 58.7617),
+            control2: point(69.1934, 67.6621)
+        )
+        path.addCurve(
+            to: point(61.8242, 81.252),
+            control1: point(59.623, 71.3945),
+            control2: point(61.8242, 75.9883)
+        )
+        path.addLine(to: point(61.8242, 91.2051))
+        path.addCurve(
+            to: point(67.0879, 94.5547),
+            control1: point(61.8242, 94.0762),
+            control2: point(64.2168, 95.7031)
+        )
+        path.addCurve(
+            to: point(98, 49.1914),
+            control1: point(84.4102, 87.9512),
+            control2: point(98, 70.6289)
+        )
+        path.addCurve(
+            to: point(48.9043, 0),
+            control1: point(98, 22.1074),
+            control2: point(75.9883, 0)
+        )
+        path.addCurve(
+            to: point(0, 49.1914),
+            control1: point(21.8203, 0),
+            control2: point(0, 22.1074)
+        )
+        path.addCurve(
+            to: point(31.6777, 94.6504),
+            control1: point(0, 70.4375),
+            control2: point(13.4941, 88.0469)
+        )
+        path.addCurve(
+            to: point(36.75, 91.3008),
+            control1: point(34.2617, 95.6074),
+            control2: point(36.75, 93.8848)
+        )
+        path.addLine(to: point(36.75, 83.6445))
+        path.addCurve(
+            to: point(32.1562, 84.6016),
+            control1: point(35.4102, 84.2188),
+            control2: point(33.6875, 84.6016)
+        )
+        path.addCurve(
+            to: point(19.4277, 74.7441),
+            control1: point(25.8398, 84.6016),
+            control2: point(22.1074, 81.1563)
+        )
+        path.addCurve(
+            to: point(15.0254, 70.3418),
+            control1: point(18.375, 72.1602),
+            control2: point(17.2266, 70.6289)
+        )
+        path.addCurve(
+            to: point(13.4941, 69.1934),
+            control1: point(13.877, 70.2461),
+            control2: point(13.4941, 69.7676)
+        )
+        path.addCurve(
+            to: point(17.3223, 67.1836),
+            control1: point(13.4941, 68.0449),
+            control2: point(15.4082, 67.1836)
+        )
+        path.addCurve(
+            to: point(24.9785, 72.4473),
+            control1: point(20.0977, 67.1836),
+            control2: point(22.4902, 68.9063)
+        )
+        path.addCurve(
+            to: point(31.2949, 76.4668),
+            control1: point(26.8926, 75.2227),
+            control2: point(28.9023, 76.4668)
+        )
+        path.addCurve(
+            to: point(37.4199, 73.4043),
+            control1: point(33.6875, 76.4668),
+            control2: point(35.2187, 75.6055)
+        )
+        path.addCurve(
+            to: point(41.4395, 69.3848),
+            control1: point(39.0469, 71.7773),
+            control2: point(40.291, 70.3418)
+        )
+        path.closeSubpath()
+        return path
     }
 }
 
@@ -97,24 +315,36 @@ struct SessionNestStatusPopover: View {
                         .background(Color.orange.opacity(0.14), in: Capsule())
                     }
                     Spacer()
-                    ForEach(SessionNestPublicLink.allCases, id: \.self) { link in
-                        Button {
-                            openURL(link.url)
-                        } label: {
-                            Label(link.title, systemImage: link.systemImage)
-                                .labelStyle(.iconOnly)
+                    HStack(spacing: 4) {
+                        ForEach(SessionNestPublicLink.allCases, id: \.self) { link in
+                            StatusPopoverHeaderButton(title: link.title) {
+                                openURL(link.url)
+                            } label: {
+                                publicLinkIcon(link.icon)
+                            }
                         }
-                        .help(link.title)
-                        .accessibilityLabel(link.title)
-                    }
-                    Button(action: refresh) {
-                        Label("刷新", systemImage: "arrow.clockwise")
-                            .labelStyle(.iconOnly)
-                    }
-                    .disabled(status.showsProgress)
-                    Button(action: openMainWindow) {
-                        Label("打开 SessionNest", systemImage: "macwindow")
-                            .labelStyle(.iconOnly)
+
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.14))
+                            .frame(
+                                width: 1,
+                                height: SessionNestStatusPopoverHeaderLayout.dividerHeight
+                            )
+                            .padding(.horizontal, 2)
+
+                        StatusPopoverHeaderButton(
+                            title: "刷新",
+                            isEnabled: !status.showsProgress,
+                            action: refresh
+                        ) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                        }
+                        StatusPopoverHeaderButton(
+                            title: "打开 SessionNest",
+                            action: openMainWindow
+                        ) {
+                            Image(systemName: "rectangle.split.2x1")
+                        }
                     }
                 }
 
@@ -220,6 +450,17 @@ struct SessionNestStatusPopover: View {
             .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
         }
         .padding(.trailing, -SessionNestStatusPopoverLayout.scrollViewTrailingExtension)
+    }
+
+    @ViewBuilder
+    private func publicLinkIcon(_ icon: SessionNestPublicLinkIcon) -> some View {
+        switch icon {
+        case .system(let systemName):
+            Image(systemName: systemName)
+        case .github:
+            GitHubMarkShape()
+                .fill(.primary)
+        }
     }
 
     private var settings: some View {

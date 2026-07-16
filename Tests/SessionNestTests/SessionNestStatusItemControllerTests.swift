@@ -5,15 +5,15 @@ import Testing
 
 @Test func publicLinksUseApprovedDestinationsAndSymbols() {
     #expect(SessionNestPublicLink.website.url.absoluteString == "https://www.nemoob.cn/")
-    #expect(SessionNestPublicLink.website.systemImage == "globe")
+    #expect(SessionNestPublicLink.website.icon == .system("safari"))
     #expect(
         SessionNestPublicLink.repository.url.absoluteString
             == "https://github.com/nemoob/sessionnest"
     )
-    #expect(
-        SessionNestPublicLink.repository.systemImage
-            == "chevron.left.forwardslash.chevron.right"
-    )
+    #expect(SessionNestPublicLink.repository.icon == .github)
+    #expect(SessionNestStatusPopoverHeaderLayout.buttonDiameter == 30)
+    #expect(SessionNestStatusPopoverHeaderLayout.iconSize == 16)
+    #expect(SessionNestStatusPopoverHeaderLayout.dividerHeight == 18)
 }
 
 @Test func statusItemClickRoutesLeftAndRightMouseButtons() {
@@ -81,7 +81,7 @@ import Testing
 }
 
 @Test func compactQuotaRingKeepsSmallRemainingGapVisible() {
-    #expect(SessionNestStatusLabelLayout.ringLineWidth == 3)
+    #expect(SessionNestStatusLabelLayout.ringLineWidth == 4)
     #expect(SessionNestStatusLabelLayout.ringLineCap == .butt)
 }
 
