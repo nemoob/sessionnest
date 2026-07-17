@@ -570,6 +570,16 @@ struct SessionNestStatusPopover: View {
             }
         }
         .chartXAxis(.hidden)
+        .chartYAxis {
+            AxisMarks(position: .trailing) { value in
+                AxisGridLine()
+                AxisValueLabel {
+                    if let amount = value.as(Int64.self) {
+                        Text(statistics.tokenAxisLabel(amount))
+                    }
+                }
+            }
+        }
         .frame(height: 130)
         .accessibilityLabel("每日 Token 趋势")
     }

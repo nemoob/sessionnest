@@ -91,6 +91,24 @@ import Testing
     #expect(status.projectFraction(zeroProject) == 0)
 }
 
+@Test func menuBarStatisticsFormatsTokenAxisLabelsInChinese() {
+    let status = MenuBarStatisticsStatus(
+        snapshot: StatisticsSnapshot(
+            totalUsage: .zero,
+            totalSessionCount: 0,
+            measuredSessionCount: 0,
+            averageTokensPerMeasuredSession: 0,
+            dailyPoints: [],
+            projectRows: [],
+            sessionRows: []
+        )
+    )
+
+    #expect(status.tokenAxisLabel(600_000_000) == "6亿")
+    #expect(status.tokenAxisLabel(40_000_000) == "4000万")
+    #expect(status.tokenAxisLabel(0) == "0")
+}
+
 @Test func menuBarStatisticsPassesThroughDailyPointsAndClampsProjectFractions() {
     let dailyPoints = [
         StatisticsDailyPoint(

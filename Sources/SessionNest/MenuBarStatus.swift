@@ -148,6 +148,10 @@ struct MenuBarStatisticsStatus {
     func compact(_ value: Int64) -> String {
         value.formatted(chineseCompactNumberFormat)
     }
+
+    func tokenAxisLabel(_ value: Int64) -> String {
+        compact(value)
+    }
 }
 
 struct MenuBarStatus {
