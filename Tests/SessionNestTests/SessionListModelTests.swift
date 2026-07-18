@@ -649,7 +649,7 @@ import Testing
         rolloutPath: fixture.thread.path!,
         fileSize: 0,
         fileModificationTimeNS: 0,
-        parserVersion: 1,
+        parserVersion: 2,
         result: cachedResult,
         rebuild: true
     )

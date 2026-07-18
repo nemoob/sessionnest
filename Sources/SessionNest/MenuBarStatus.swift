@@ -126,9 +126,10 @@ struct MenuBarResetCreditsStatus {
         }
 
         summaryText = "重置卡 可用 \(availableCount) 次"
-        expirationText = availableCredits.first.map {
-            "最近于 \(Self.shortDate($0.expiresAt, calendar: calendar)) 到期"
-        } ?? "到期时间暂不可用"
+        expirationText =
+            availableCredits.first.map {
+                "最近于 \(Self.shortDate($0.expiresAt, calendar: calendar)) 到期"
+            } ?? "到期时间暂不可用"
     }
 
     func fullExpirationText(for credit: CodexRateLimitResetCredit) -> String {

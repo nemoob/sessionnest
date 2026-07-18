@@ -99,7 +99,8 @@ struct TokenTrendChart: View {
                     .onContinuousHover(coordinateSpace: .local) { phase in
                         switch phase {
                         case .active(let location):
-                            hoveredDay = point(at: location, proxy: proxy, geometry: geometry)?.dayStart
+                            hoveredDay =
+                                point(at: location, proxy: proxy, geometry: geometry)?.dayStart
                         case .ended:
                             hoveredDay = nil
                         }
@@ -283,4 +284,3 @@ struct TokenTrendChart: View {
         "\(value.formatted()) Token"
     }
 }
-

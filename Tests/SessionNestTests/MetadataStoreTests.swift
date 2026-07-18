@@ -398,6 +398,78 @@ import Testing
         ])
 }
 
+@Test func v012TokenSchemaUpgradesAdditivelyAndRemainsLegacyReadable() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    try executeSQLite(
+        """
+        CREATE TABLE thread_token_usage (
+          thread_id TEXT PRIMARY KEY,
+          rollout_path TEXT NOT NULL,
+          file_size INTEGER NOT NULL,
+          file_mtime_ns INTEGER NOT NULL,
+          scanned_offset INTEGER NOT NULL,
+          input_tokens INTEGER NOT NULL,
+          cached_input_tokens INTEGER NOT NULL,
+          output_tokens INTEGER NOT NULL,
+          reasoning_output_tokens INTEGER NOT NULL,
+          total_tokens INTEGER NOT NULL,
+          last_event_at INTEGER,
+          parser_version INTEGER NOT NULL
+        );
+        CREATE TABLE thread_token_daily (
+          thread_id TEXT NOT NULL,
+          day_start INTEGER NOT NULL,
+          input_tokens INTEGER NOT NULL,
+          cached_input_tokens INTEGER NOT NULL,
+          output_tokens INTEGER NOT NULL,
+          reasoning_output_tokens INTEGER NOT NULL,
+          total_tokens INTEGER NOT NULL,
+          PRIMARY KEY (thread_id, day_start)
+        );
+        INSERT INTO thread_token_usage VALUES
+          ('legacy', '/rollout/legacy.jsonl', 200, 300, 180, 40, 30, 10, 5, 50, 400, 1);
+        INSERT INTO thread_token_daily VALUES
+          ('legacy', 100, 40, 30, 10, 5, 50);
+        """,
+        at: databaseURL
+    )
+
+    let store = try MetadataStore(databaseURL: databaseURL)
+    #expect(try await store.loadThreadTokenCache()["legacy"]?.maximum.totalTokens == 50)
+    #expect(try await store.loadThreadTokenDailyUsage().map(\.usage.totalTokens) == [50])
+    #expect(try await store.loadThreadTokenTimedUsage(startingAt: 0, endingAt: 1_000).isEmpty)
+
+    var database: OpaquePointer?
+    #expect(sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+    guard let database else { return }
+    defer { sqlite3_close(database) }
+    var statement: OpaquePointer?
+    #expect(
+        sqlite3_prepare_v2(
+            database,
+            """
+            SELECT u.thread_id, u.total_tokens, d.day_start, d.total_tokens
+            FROM thread_token_usage AS u
+            JOIN thread_token_daily AS d ON d.thread_id = u.thread_id
+            """,
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK
+    )
+    guard let statement else { return }
+    defer { sqlite3_finalize(statement) }
+    #expect(sqlite3_step(statement) == SQLITE_ROW)
+    #expect(String(cString: sqlite3_column_text(statement, 0)) == "legacy")
+    #expect(sqlite3_column_int64(statement, 1) == 50)
+    #expect(sqlite3_column_int64(statement, 2) == 100)
+    #expect(sqlite3_column_int64(statement, 3) == 50)
+    #expect(sqlite3_step(statement) == SQLITE_DONE)
+}
+
 @Test func tokenUsageCacheDoesNotFabricateUncoveredThreads() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)

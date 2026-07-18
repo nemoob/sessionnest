@@ -49,9 +49,10 @@ import Testing
 
     #expect(status.summaryText == "重置卡 可用 3 次")
     #expect(status.expirationText == "最近于 7月27日 07:41 到期")
-    #expect(status.availableCredits.map(\.id) == [
-        "internal-first", "internal-second", "internal-later",
-    ])
+    #expect(
+        status.availableCredits.map(\.id) == [
+            "internal-first", "internal-second", "internal-later",
+        ])
     #expect(status.expirationText.contains("internal") == false)
 }
 
