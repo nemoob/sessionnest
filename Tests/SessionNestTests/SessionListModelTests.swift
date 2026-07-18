@@ -468,6 +468,90 @@ import Testing
     #expect(searched.isEmpty)
 }
 
+@Test func projectTreeOmitsNoProjectScratchPathsAndKeepsResolvedRepository() {
+    let scratchWithoutProject = directoryThread(
+        "scratch-none",
+        cwd: "/Users/me/Documents/Codex/2026-07-18/none",
+        updatedAt: 4
+    )
+    let scratchWithProject = directoryThread(
+        "scratch-project",
+        cwd: "/Users/me/Documents/Codex/2026-07-18/with-project",
+        updatedAt: 4
+    )
+    let repository = "/Users/me/Documents/Codex/2026-07-18/with-project/repository"
+    let projects = [
+        scratchWithoutProject.id: ThreadProjectCache(
+            threadID: scratchWithoutProject.id,
+            resolution: .noProject,
+            analyzedUpdatedAt: 4,
+            classifierVersion: 1
+        ),
+        scratchWithProject.id: ThreadProjectCache(
+            threadID: scratchWithProject.id,
+            resolution: .project(path: repository),
+            analyzedUpdatedAt: 4,
+            classifierVersion: 1
+        ),
+    ]
+
+    let tree = ProjectDirectoryTree.build(
+        threads: [scratchWithoutProject, scratchWithProject],
+        threadProjects: projects
+    )
+
+    #expect(tree.map(\.path) == [repository])
+    #expect(tree[0].directCount == 1)
+    #expect(tree[0].children.isEmpty)
+}
+
+@Test func noProjectSelectionAndRawWorkingDirectorySearchRemainAvailable() {
+    let scratch = directoryThread(
+        "scratch",
+        cwd: "/Users/me/Documents/Codex/2026-07-18/session",
+        updatedAt: 4
+    )
+    let normal = directoryThread("normal", cwd: "/work/normal", updatedAt: 3)
+    let projects = [
+        scratch.id: ThreadProjectCache(
+            threadID: scratch.id,
+            resolution: .noProject,
+            analyzedUpdatedAt: 4,
+            classifierVersion: 1
+        )
+    ]
+
+    let noProject = SessionFilter.apply(
+        threads: [scratch, normal],
+        metadata: [:],
+        tags: [],
+        threadTags: [:],
+        threadProjects: projects,
+        selection: .noProject,
+        query: "",
+        timeFilter: .all,
+        sortOrder: .recent,
+        now: 100
+    )
+    let searched = SessionFilter.apply(
+        threads: [scratch, normal],
+        metadata: [:],
+        tags: [],
+        threadTags: [:],
+        threadProjects: projects,
+        selection: .recent,
+        query: "2026-07-18/session",
+        timeFilter: .all,
+        sortOrder: .recent,
+        now: 100
+    )
+
+    #expect(noProject.map(\.id) == [scratch.id])
+    #expect(noProject[0].projectPath == nil)
+    #expect(noProject[0].projectName == "无项目")
+    #expect(searched.map(\.id) == [scratch.id])
+}
+
 @Test func classificationTaskReplacementWaitsForCanceledTaskToFinish() async {
     let probe = ClassificationTaskReplacementProbe()
     let previous = Task.detached {

@@ -17,6 +17,7 @@ enum SidebarSelection: Hashable {
     case statistics
     case favorites
     case unclassified
+    case noProject
     case archived
     case project(String)
     case collection(String)
@@ -39,10 +40,13 @@ struct ManagedThread: Identifiable, Equatable {
     let thread: CodexThread
     let metadata: ThreadMetadata
     let tags: [SessionTag]
-    let projectPath: String
+    let projectResolution: ThreadProjectResolution
 
     var id: String { thread.id }
-    var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
+    var projectPath: String? { projectResolution.projectPath }
+    var projectName: String {
+        projectPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "无项目"
+    }
 }
 
 struct ProjectDirectoryNode: Identifiable, Equatable {
@@ -61,16 +65,27 @@ enum ProjectDirectoryTree {
         threads: [CodexThread],
         threadProjects: [String: ThreadProjectCache]
     ) -> [ProjectDirectoryNode] {
-        let directCounts = Dictionary(
-            grouping: threads,
-            by: {
-                ThreadProjectClassification.effectivePath(
-                    for: $0,
-                    cached: threadProjects[$0.id]
+        let resolvedThreads = threads.map { thread in
+            (
+                thread,
+                ThreadProjectClassification.effectiveResolution(
+                    for: thread,
+                    cached: threadProjects[thread.id]
                 )
+            )
+        }
+        var directCounts: [String: Int] = [:]
+        var includedPaths: Set<String> = []
+        for (thread, resolution) in resolvedThreads {
+            guard let projectPath = resolution.projectPath else { continue }
+            let normalizedProjectPath = normalizedPath(projectPath)
+            directCounts[normalizedProjectPath, default: 0] += 1
+            includedPaths.insert(normalizedProjectPath)
+            if CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd) == nil {
+                includedPaths.insert(normalizedPath(thread.cwd))
             }
-        ).mapValues(\.count)
-        let paths = Array(Set(directCounts.keys).union(threads.map { normalizedPath($0.cwd) }))
+        }
+        let paths = Array(includedPaths)
         let parentByPath = Dictionary(
             uniqueKeysWithValues: paths.map { path in
                 let parent =
@@ -261,7 +276,7 @@ enum SessionFilter {
                 thread: thread,
                 metadata: threadMetadata,
                 tags: attachedTags,
-                projectPath: ThreadProjectClassification.effectivePath(
+                projectResolution: ThreadProjectClassification.effectiveResolution(
                     for: thread,
                     cached: threadProjects[thread.id]
                 )
@@ -319,8 +334,10 @@ enum SessionFilter {
             thread.metadata.isFavorite
         case .unclassified:
             thread.metadata.collectionID == nil
+        case .noProject:
+            thread.projectResolution.isNoProject
         case .project(let path):
-            ProjectDirectoryTree.contains(path: thread.projectPath, in: path)
+            thread.projectPath.map { ProjectDirectoryTree.contains(path: $0, in: path) } == true
         case .collection(let id):
             thread.metadata.collectionID == id
         case .tag(let id):
@@ -333,7 +350,8 @@ enum SessionFilter {
             [
                 thread.thread.displayTitle,
                 thread.thread.preview,
-                thread.projectPath,
+                thread.thread.cwd,
+                thread.projectPath ?? "",
                 thread.projectName,
                 thread.thread.gitInfo?.branch ?? "",
             ] + thread.tags.map(\.name)

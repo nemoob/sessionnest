@@ -59,8 +59,10 @@ struct SessionManagerView: View {
                 .tag(SidebarSelection.recent)
             sidebarRow("收藏", systemImage: "star.fill", count: favoriteCount)
                 .tag(SidebarSelection.favorites)
-            sidebarRow("未分类", systemImage: "tray", count: unclassifiedCount)
+            sidebarRow("未加入分类", systemImage: "tray", count: unclassifiedCount)
                 .tag(SidebarSelection.unclassified)
+            sidebarRow("无项目", systemImage: "questionmark.folder", count: noProjectCount)
+                .tag(SidebarSelection.noProject)
             sidebarRow("已归档", systemImage: "archivebox", count: model.archivedThreads.count)
                 .tag(SidebarSelection.archived)
 
@@ -285,7 +287,8 @@ struct SessionManagerView: View {
         case .recent: "最近会话"
         case .statistics: "统计概览"
         case .favorites: "收藏"
-        case .unclassified: "未分类"
+        case .unclassified: "未加入分类"
+        case .noProject: "无项目"
         case .archived: "已归档"
         case .project(let path): URL(fileURLWithPath: path).lastPathComponent
         case .collection(let id):
@@ -301,6 +304,15 @@ struct SessionManagerView: View {
 
     private var unclassifiedCount: Int {
         model.activeThreads.count { model.metadata[$0.id]?.collectionID == nil }
+    }
+
+    private var noProjectCount: Int {
+        model.activeThreads.count {
+            ThreadProjectClassification.effectiveResolution(
+                for: $0,
+                cached: model.threadProjects[$0.id]
+            ).isNoProject
+        }
     }
 
     private func collectionCount(_ collectionID: String) -> Int {
