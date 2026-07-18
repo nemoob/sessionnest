@@ -11,6 +11,7 @@ typealias TokenScanOperation =
     ) async throws -> TokenScanResult
 typealias ThreadReloadOperation = @Sendable () async throws -> ([CodexThread], [CodexThread])
 typealias RateLimitRefreshOperation = @Sendable () async throws -> CodexRateLimitSnapshot
+typealias UsageRefreshOperation = @Sendable () async throws -> CodexUsageSnapshot
 
 enum SidebarSelection: Hashable {
     case recent
@@ -383,6 +384,7 @@ final class SessionListModel: ObservableObject {
     @Published var threadTokenDailyUsage: [ThreadTokenDailyUsage] = []
     @Published private(set) var tokenCoveredThreadIDs: Set<String> = []
     @Published private(set) var rateLimitSnapshot: CodexRateLimitSnapshot?
+    @Published private(set) var resetCreditsSnapshot: CodexRateLimitResetCreditsSummary?
     @Published private(set) var accountSnapshot: CodexAccountSnapshot?
     @Published private(set) var quotaCycleStatisticsSnapshot: StatisticsSnapshot?
     @Published private(set) var lastSuccessfulReloadAt: Date?
@@ -398,7 +400,7 @@ final class SessionListModel: ObservableObject {
 
     let client: CodexClient
     let store: MetadataStore
-    private let rateLimitRefreshOperation: RateLimitRefreshOperation
+    private let usageRefreshOperation: UsageRefreshOperation
     private let tokenScanOperation: TokenScanOperation
     private let threadReloadOperation: ThreadReloadOperation?
     private var stateRevision = SessionStateRevision()
@@ -460,6 +462,7 @@ final class SessionListModel: ObservableObject {
         client: CodexClient,
         store: MetadataStore,
         rateLimitRefreshOperation: RateLimitRefreshOperation? = nil,
+        usageRefreshOperation: UsageRefreshOperation? = nil,
         tokenScanOperation: @escaping TokenScanOperation = { url, offset, baseline, calendar in
             try RolloutTokenScanner.scan(
                 url: url,
@@ -472,8 +475,18 @@ final class SessionListModel: ObservableObject {
     ) {
         self.client = client
         self.store = store
-        self.rateLimitRefreshOperation =
-            rateLimitRefreshOperation ?? { try await client.readRateLimits() }
+        if let usageRefreshOperation {
+            self.usageRefreshOperation = usageRefreshOperation
+        } else if let rateLimitRefreshOperation {
+            self.usageRefreshOperation = {
+                CodexUsageSnapshot(
+                    rateLimits: try await rateLimitRefreshOperation(),
+                    resetCredits: nil
+                )
+            }
+        } else {
+            self.usageRefreshOperation = { try await client.readUsageSnapshot() }
+        }
         self.tokenScanOperation = tokenScanOperation
         self.threadReloadOperation = threadReloadOperation
     }
@@ -521,8 +534,8 @@ final class SessionListModel: ObservableObject {
                 loadedThreadTokenCache,
                 loadedThreadTokenDailyUsage
             )
-            let rateLimitSnapshot =
-                threadReloadOperation == nil ? try? await client.readRateLimits() : nil
+            let usageSnapshot =
+                threadReloadOperation == nil ? try? await client.readUsageSnapshot() : nil
             let accountSnapshot =
                 threadReloadOperation == nil ? try? await client.readAccount() : nil
             guard stateRevision.accepts(revision) else { return }
@@ -540,7 +553,8 @@ final class SessionListModel: ObservableObject {
                 cache: result.6,
                 parserVersion: Self.tokenParserVersion
             )
-            self.rateLimitSnapshot = rateLimitSnapshot
+            rateLimitSnapshot = usageSnapshot?.rateLimits
+            resetCreditsSnapshot = usageSnapshot?.resetCredits
             self.accountSnapshot = accountSnapshot
             lastSuccessfulReloadAt = Date()
             errorMessage = nil
@@ -576,9 +590,10 @@ final class SessionListModel: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             do {
-                let snapshot = try await rateLimitRefreshOperation()
+                let snapshot = try await usageRefreshOperation()
                 guard !Task.isCancelled else { return }
-                rateLimitSnapshot = snapshot
+                rateLimitSnapshot = snapshot.rateLimits
+                resetCreditsSnapshot = snapshot.resetCredits
                 await refreshQuotaCycleStatistics()
             } catch {
                 return

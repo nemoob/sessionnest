@@ -27,6 +27,49 @@ import Testing
     #expect(missing.compactTokenText == "已用 --")
 }
 
+@Test func resetCreditsStatusSortsAvailableCardsAndFormatsLocalExpiration() {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    let now: Int64 = 1_784_329_200
+    let summary = CodexRateLimitResetCreditsSummary(
+        availableCount: 3,
+        credits: [
+            resetCredit(id: "internal-later", status: "available", expiresAt: 1_786_555_921),
+            resetCredit(id: "internal-used", status: "consumed", expiresAt: 1_785_109_319),
+            resetCredit(id: "internal-first", status: "available", expiresAt: 1_785_109_319),
+            resetCredit(id: "internal-second", status: "available", expiresAt: 1_785_527_481),
+        ]
+    )
+
+    let status = MenuBarResetCreditsStatus(
+        summary: summary,
+        now: now,
+        calendar: calendar
+    )
+
+    #expect(status.summaryText == "重置卡 可用 3 次")
+    #expect(status.expirationText == "最近于 7月27日 07:41 到期")
+    #expect(status.availableCredits.map(\.id) == [
+        "internal-first", "internal-second", "internal-later",
+    ])
+    #expect(status.expirationText.contains("internal") == false)
+}
+
+@Test func resetCreditsStatusDistinguishesMissingAndZeroAvailability() {
+    let missing = MenuBarResetCreditsStatus(summary: nil, now: 1_000)
+    let zero = MenuBarResetCreditsStatus(
+        summary: CodexRateLimitResetCreditsSummary(availableCount: 0, credits: []),
+        now: 1_000
+    )
+
+    #expect(missing.summaryText == "重置卡信息暂不可用")
+    #expect(missing.expirationText == "Codex 当前未提供重置卡信息")
+    #expect(missing.availableCredits.isEmpty)
+    #expect(zero.summaryText == "暂无可用重置卡")
+    #expect(zero.expirationText == "当前账户没有可用次数")
+    #expect(zero.availableCredits.isEmpty)
+}
+
 @Test func menuBarStatisticsFormatsDashboardSummary() {
     let projects = (1...6).map { index in
         StatisticsProjectRow(
@@ -419,4 +462,20 @@ import Testing
     #expect(status.tokenCoveragePercentText == "0%")
     #expect(status.tokenCoverageFraction == 0)
     #expect(status.showsProgress)
+}
+
+private func resetCredit(
+    id: String,
+    status: String,
+    expiresAt: Int64
+) -> CodexRateLimitResetCredit {
+    CodexRateLimitResetCredit(
+        id: id,
+        resetType: "codexRateLimits",
+        status: status,
+        grantedAt: expiresAt - 2_592_000,
+        expiresAt: expiresAt,
+        title: "Full reset",
+        description: "Granted"
+    )
 }

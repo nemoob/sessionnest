@@ -88,6 +88,48 @@ import Testing
 }
 
 @MainActor
+@Test func lightweightUsageRefreshPublishesResetCreditsAtomically() async throws {
+    let fixture = try SessionModelFixture(
+        threadID: "lightweight-usage",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let rateLimits = try weeklyRateLimitSnapshot(usedPercent: 8)
+    let credits = CodexRateLimitResetCreditsSummary(
+        availableCount: 1,
+        credits: [
+            CodexRateLimitResetCredit(
+                id: "credit-1",
+                resetType: "codexRateLimits",
+                status: "available",
+                grantedAt: 100,
+                expiresAt: 200,
+                title: "Full reset",
+                description: "Granted"
+            )
+        ]
+    )
+    let usage = CodexUsageSnapshot(rateLimits: rateLimits, resetCredits: credits)
+    let probe = UsageRefreshProbe(snapshot: usage)
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        usageRefreshOperation: { try await probe.load() }
+    )
+
+    await model.refreshRateLimits()
+
+    #expect(model.rateLimitSnapshot == rateLimits)
+    #expect(model.resetCreditsSnapshot == credits)
+
+    await probe.failSubsequentLoads()
+    await model.refreshRateLimits()
+
+    #expect(model.rateLimitSnapshot == rateLimits)
+    #expect(model.resetCreditsSnapshot == credits)
+}
+
+@MainActor
 @Test func concurrentRateLimitRefreshCallsShareOneRequest() async throws {
     let fixture = try SessionModelFixture(
         threadID: "coalesced-rate-limit",
@@ -804,6 +846,24 @@ private actor RateLimitRefreshProbe {
     }
 
     func load() throws -> CodexRateLimitSnapshot {
+        if shouldFail { throw RateLimitRefreshTestError.expectedFailure }
+        return snapshot
+    }
+
+    func failSubsequentLoads() {
+        shouldFail = true
+    }
+}
+
+private actor UsageRefreshProbe {
+    let snapshot: CodexUsageSnapshot
+    private var shouldFail = false
+
+    init(snapshot: CodexUsageSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func load() throws -> CodexUsageSnapshot {
         if shouldFail { throw RateLimitRefreshTestError.expectedFailure }
         return snapshot
     }
