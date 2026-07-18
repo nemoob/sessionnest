@@ -612,64 +612,7 @@ struct SessionNestStatusPopover: View {
     }
 
     private func tokenTrend(_ statistics: MenuBarStatisticsStatus) -> some View {
-        Chart(statistics.dailyPoints) { point in
-            LineMark(
-                x: .value(
-                    "日期",
-                    Date(timeIntervalSince1970: TimeInterval(point.dayStart))
-                ),
-                y: .value("Token", point.usage.totalTokens),
-                series: .value("类型", "总 Token")
-            )
-            .foregroundStyle(Color.accentColor)
-            .interpolationMethod(.monotone)
-
-            LineMark(
-                x: .value(
-                    "日期",
-                    Date(timeIntervalSince1970: TimeInterval(point.dayStart))
-                ),
-                y: .value("Token", point.usage.cachedInputTokens),
-                series: .value("类型", "缓存输入")
-            )
-            .foregroundStyle(Color.orange)
-            .interpolationMethod(.monotone)
-
-            if statistics.showsSingleDayTrendMarker {
-                PointMark(
-                    x: .value(
-                        "日期",
-                        Date(timeIntervalSince1970: TimeInterval(point.dayStart))
-                    ),
-                    y: .value("Token", point.usage.totalTokens)
-                )
-                .foregroundStyle(Color.accentColor)
-                .symbolSize(36)
-
-                PointMark(
-                    x: .value(
-                        "日期",
-                        Date(timeIntervalSince1970: TimeInterval(point.dayStart))
-                    ),
-                    y: .value("Token", point.usage.cachedInputTokens)
-                )
-                .foregroundStyle(Color.orange)
-                .symbolSize(36)
-            }
-        }
-        .chartXAxis(.hidden)
-        .chartYAxis {
-            AxisMarks(position: .trailing) { value in
-                AxisGridLine()
-                AxisValueLabel {
-                    if let amount = value.as(Int64.self) {
-                        Text(statistics.tokenAxisLabel(amount))
-                    }
-                }
-            }
-        }
-        .frame(height: 130)
-        .accessibilityLabel("每日 Token 趋势")
+        TokenTrendChart(points: statistics.dailyPoints, presentation: .popover)
     }
 
 }

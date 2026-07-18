@@ -115,39 +115,7 @@ struct StatisticsDashboardView: View {
 
     private func dailyTrend(snapshot: StatisticsSnapshot) -> some View {
         dashboardSection(title: "Token 趋势", subtitle: "按本地自然日统计实际新增用量") {
-            Chart(snapshot.dailyPoints) { point in
-                LineMark(
-                    x: .value("日期", date(for: point.dayStart)),
-                    y: .value("Token", point.usage.totalTokens),
-                    series: .value("类型", "总 Token")
-                )
-                .foregroundStyle(by: .value("类型", "总 Token"))
-                .interpolationMethod(.monotone)
-
-                LineMark(
-                    x: .value("日期", date(for: point.dayStart)),
-                    y: .value("Token", point.usage.cachedInputTokens),
-                    series: .value("类型", "缓存输入")
-                )
-                .foregroundStyle(by: .value("类型", "缓存输入"))
-                .interpolationMethod(.monotone)
-            }
-            .chartForegroundStyleScale([
-                "总 Token": Color.accentColor,
-                "缓存输入": Color.orange,
-            ])
-            .chartYAxis {
-                AxisMarks(position: .leading) { value in
-                    AxisGridLine()
-                    AxisValueLabel {
-                        if let amount = value.as(Int64.self) {
-                            Text(compact(amount))
-                        }
-                    }
-                }
-            }
-            .frame(height: 230)
-            .accessibilityLabel("每日 Token 趋势")
+            TokenTrendChart(points: snapshot.dailyPoints, presentation: .dashboard)
         }
     }
 
@@ -360,9 +328,6 @@ struct StatisticsDashboardView: View {
         "\(value.formatted()) Token"
     }
 
-    private func date(for timestamp: Int64) -> Date {
-        Date(timeIntervalSince1970: TimeInterval(timestamp))
-    }
 }
 
 extension View {
