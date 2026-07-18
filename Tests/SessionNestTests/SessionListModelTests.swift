@@ -169,6 +169,50 @@ import Testing
 }
 
 @MainActor
+@Test func reloadImmediatelyMergesLinkedWorktreeProject() async throws {
+    let fixture = try SessionModelFixture(
+        threadID: "worktree-reload",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fileManager.removeItem(at: root) }
+
+    let main = root.appendingPathComponent("DBBridge")
+    let commonGitDirectory = main.appendingPathComponent(".git")
+    let linked = root.appendingPathComponent(".codex/worktrees/abcd/DBBridge")
+    let linkedGitDirectory = commonGitDirectory.appendingPathComponent("worktrees/DBBridge2")
+    try fileManager.createDirectory(at: linkedGitDirectory, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: linked, withIntermediateDirectories: true)
+    try Data("../..\n".utf8).write(to: linkedGitDirectory.appendingPathComponent("commondir"))
+    try Data("gitdir: \(linkedGitDirectory.path)\n".utf8).write(
+        to: linked.appendingPathComponent(".git")
+    )
+    let threads = [
+        directoryThread("main", cwd: main.path),
+        directoryThread("linked", cwd: linked.path),
+    ]
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        threadReloadOperation: { (threads, []) }
+    )
+
+    await model.reload()
+
+    #expect(model.projectTree.map(\.path) == [main.path])
+    #expect(model.projectTree[0].totalCount == 2)
+    try await waitForTokenCondition { model.threadProjects.count == 2 }
+    #expect(
+        model.threadProjects.values.allSatisfy {
+            $0.resolution == .project(path: main.path)
+                && $0.classifierVersion == ThreadProjectClassification.classifierVersion
+        }
+    )
+}
+
+@MainActor
 @Test func explicitStatisticsRangeDoesNotChangeMainPanelFilter() throws {
     let fixture = try SessionModelFixture(
         threadID: "explicit-statistics-range",
@@ -321,6 +365,57 @@ import Testing
     #expect(tree[1].children[0].children.map(\.path) == ["/work/codex/sample-app/tools"])
 }
 
+@Test func projectTreeMergesLinkedWorktreeIntoMainRepository() throws {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fileManager.removeItem(at: root) }
+
+    let main = root.appendingPathComponent("DBBridge")
+    let commonGitDirectory = main.appendingPathComponent(".git")
+    let linked = root.appendingPathComponent(".codex/worktrees/abcd/DBBridge")
+    let linkedGitDirectory = commonGitDirectory.appendingPathComponent("worktrees/DBBridge2")
+    try fileManager.createDirectory(at: linkedGitDirectory, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: linked, withIntermediateDirectories: true)
+    try Data("../..\n".utf8).write(to: linkedGitDirectory.appendingPathComponent("commondir"))
+    try Data("gitdir: \(linkedGitDirectory.path)\n".utf8).write(
+        to: linked.appendingPathComponent(".git")
+    )
+    let threads = [
+        directoryThread("main", cwd: main.path),
+        directoryThread("linked", cwd: linked.path),
+    ]
+    let identityIndex = ThreadProjectIdentityIndex.build(
+        threads: threads,
+        fileManager: fileManager
+    )
+
+    let tree = ProjectDirectoryTree.build(
+        threads: threads,
+        threadProjects: [:],
+        projectIdentityIndex: identityIndex
+    )
+
+    #expect(tree.map(\.path) == [main.path])
+    #expect(tree[0].directCount == 2)
+    #expect(tree[0].totalCount == 2)
+
+    let selected = SessionFilter.apply(
+        threads: threads,
+        metadata: [:],
+        tags: [],
+        threadTags: [:],
+        threadProjects: [:],
+        projectIdentityIndex: identityIndex,
+        selection: .project(main.path),
+        query: "",
+        timeFilter: .all,
+        sortOrder: .recent,
+        now: 100
+    )
+
+    #expect(Set(selected.map(\.id)) == Set(["main", "linked"]))
+}
+
 @Test func projectSelectionIncludesOnlyItsDirectorySubtree() {
     let threads = [
         directoryThread("root", cwd: "/work/codex", updatedAt: 4),
@@ -366,7 +461,7 @@ import Testing
             threadID: "root",
             resolution: .project(path: "/work/codex/sessionnest"),
             analyzedUpdatedAt: 4,
-            classifierVersion: 1
+            classifierVersion: ThreadProjectClassification.classifierVersion
         )
     ]
 
@@ -401,7 +496,7 @@ import Testing
                 threadID: thread.id,
                 resolution: .workingDirectory(path: "/work/codex"),
                 analyzedUpdatedAt: 3,
-                classifierVersion: 1
+                classifierVersion: ThreadProjectClassification.classifierVersion
             )
         ))
     #expect(
@@ -411,7 +506,7 @@ import Testing
                 threadID: thread.id,
                 resolution: .workingDirectory(path: "/work/codex"),
                 analyzedUpdatedAt: thread.updatedAt,
-                classifierVersion: 1
+                classifierVersion: ThreadProjectClassification.classifierVersion
             )
         ) == false)
     #expect(
@@ -421,7 +516,7 @@ import Testing
                 threadID: thread.id,
                 resolution: .project(path: "/work/codex"),
                 analyzedUpdatedAt: thread.updatedAt,
-                classifierVersion: 0
+                classifierVersion: ThreadProjectClassification.classifierVersion - 1
             )
         ))
 }
@@ -453,7 +548,7 @@ import Testing
         threadID: thread.id,
         resolution: .workingDirectory(path: "/work/codex"),
         analyzedUpdatedAt: thread.updatedAt,
-        classifierVersion: 1
+        classifierVersion: ThreadProjectClassification.classifierVersion
     )
 
     #expect(ThreadProjectClassification.effectivePath(for: thread, cached: cached) == "/work/codex")
@@ -466,7 +561,7 @@ import Testing
             threadID: thread.id,
             resolution: .project(path: "/work/codex/sessionnest"),
             analyzedUpdatedAt: 3,
-            classifierVersion: 1
+            classifierVersion: ThreadProjectClassification.classifierVersion
         )
     ]
 
@@ -524,13 +619,13 @@ import Testing
             threadID: scratchWithoutProject.id,
             resolution: .noProject,
             analyzedUpdatedAt: 4,
-            classifierVersion: 1
+            classifierVersion: ThreadProjectClassification.classifierVersion
         ),
         scratchWithProject.id: ThreadProjectCache(
             threadID: scratchWithProject.id,
             resolution: .project(path: repository),
             analyzedUpdatedAt: 4,
-            classifierVersion: 1
+            classifierVersion: ThreadProjectClassification.classifierVersion
         ),
     ]
 
@@ -556,7 +651,7 @@ import Testing
             threadID: scratch.id,
             resolution: .noProject,
             analyzedUpdatedAt: 4,
-            classifierVersion: 1
+            classifierVersion: ThreadProjectClassification.classifierVersion
         )
     ]
 

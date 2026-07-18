@@ -101,7 +101,8 @@ enum ThreadProjectScanner {
 enum ThreadProjectClassifier {
     static func classify(
         evidence: ThreadProjectEvidence,
-        candidates: [String]
+        candidates: [String],
+        fileManager: FileManager = .default
     ) -> String? {
         let candidates = Set(candidates.map(ProjectDirectoryTree.normalizedPath)).sorted()
         let scored = candidates.map { ($0, score(candidate: $0, evidence: evidence)) }.sorted {
@@ -113,7 +114,10 @@ enum ThreadProjectClassifier {
             top.1 >= 3,
             top.1 > (scored.dropFirst().first?.1 ?? 0)
         else { return nil }
-        return top.0
+        return GitRepositoryIdentityResolver.resolve(
+            workingDirectory: top.0,
+            fileManager: fileManager
+        )?.canonicalProjectPath ?? top.0
     }
 
     private static func score(candidate: String, evidence: ThreadProjectEvidence) -> Int {
