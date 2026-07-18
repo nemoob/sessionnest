@@ -118,14 +118,30 @@ enum ProjectDirectoryTree {
 }
 
 enum ThreadProjectClassification {
+    static let classifierVersion: Int64 = 1
+
+    static func effectiveResolution(
+        for thread: CodexThread,
+        cached: ThreadProjectCache?
+    ) -> ThreadProjectResolution {
+        if let cached,
+            cached.analyzedUpdatedAt >= thread.updatedAt,
+            cached.classifierVersion == classifierVersion
+        {
+            return normalized(cached.resolution)
+        }
+        if CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd) != nil {
+            return .noProject
+        }
+        return .workingDirectory(path: ProjectDirectoryTree.normalizedPath(thread.cwd))
+    }
+
     static func effectivePath(
         for thread: CodexThread,
         cached: ThreadProjectCache?
     ) -> String {
-        let cachedPath = cached.flatMap {
-            $0.analyzedUpdatedAt >= thread.updatedAt ? $0.projectPath : nil
-        }
-        return ProjectDirectoryTree.normalizedPath(cachedPath ?? thread.cwd)
+        effectiveResolution(for: thread, cached: cached).projectPath
+            ?? ProjectDirectoryTree.normalizedPath(thread.cwd)
     }
 
     static func needsAnalysis(
@@ -133,6 +149,20 @@ enum ThreadProjectClassification {
         cached: ThreadProjectCache?
     ) -> Bool {
         cached == nil || cached!.analyzedUpdatedAt < thread.updatedAt
+            || cached!.classifierVersion != classifierVersion
+    }
+
+    private static func normalized(
+        _ resolution: ThreadProjectResolution
+    ) -> ThreadProjectResolution {
+        switch resolution {
+        case .project(let path):
+            .project(path: ProjectDirectoryTree.normalizedPath(path))
+        case .workingDirectory(let path):
+            .workingDirectory(path: ProjectDirectoryTree.normalizedPath(path))
+        case .noProject:
+            .noProject
+        }
     }
 }
 
@@ -363,7 +393,6 @@ final class SessionListModel: ObservableObject {
     private var rateLimitRefreshTask: Task<Void, Never>?
 
     private static let tokenParserVersion: Int64 = 1
-    nonisolated static let projectClassifierVersion: Int64 = 1
     static let automaticRefreshInterval: TimeInterval = 15 * 60
 
     var totalSessionCount: Int {
@@ -528,7 +557,7 @@ final class SessionListModel: ObservableObject {
             self.accountSnapshot = accountSnapshot
             lastSuccessfulReloadAt = Date()
             errorMessage = nil
-            await startProjectClassification(for: result.0.0)
+            await startProjectClassification(for: result.0.0 + result.0.1)
             await startTokenUsageScan(for: result.0.0 + result.0.1)
         } catch {
             record(error, revision: revision)
@@ -715,27 +744,43 @@ final class SessionListModel: ObservableObject {
                 else { return }
 
                 do {
-                    let candidates = try ThreadProjectScanner.directChildGitRepositories(
-                        in: thread.cwd
-                    )
-                    let projectPath: String?
-                    if candidates.isEmpty {
-                        projectPath = nil
-                    } else {
-                        let evidence = try await client.readThreadEvidence(threadID: thread.id)
-                        projectPath = ThreadProjectClassifier.classify(
+                    let scratchRoot = CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd)
+                    let resolution: ThreadProjectResolution
+                    if let scratchRoot {
+                        var evidence = try await client.readThreadEvidence(threadID: thread.id)
+                        evidence.commandWorkingDirectories.insert(thread.cwd)
+                        let candidates = try ThreadProjectScanner.scratchGitRepositories(
+                            in: scratchRoot,
+                            evidence: evidence
+                        )
+                        resolution = ThreadProjectClassifier.classify(
                             evidence: evidence,
                             candidates: candidates
+                        ).map(ThreadProjectResolution.project(path:)) ?? .noProject
+                    } else {
+                        let candidates = try ThreadProjectScanner.directChildGitRepositories(
+                            in: thread.cwd
                         )
+                        if candidates.isEmpty {
+                            resolution = .workingDirectory(
+                                path: ProjectDirectoryTree.normalizedPath(thread.cwd)
+                            )
+                        } else {
+                            let evidence = try await client.readThreadEvidence(threadID: thread.id)
+                            resolution = ThreadProjectClassifier.classify(
+                                evidence: evidence,
+                                candidates: candidates
+                            ).map(ThreadProjectResolution.project(path:))
+                                ?? .workingDirectory(
+                                    path: ProjectDirectoryTree.normalizedPath(thread.cwd)
+                                )
+                        }
                     }
                     let cached = ThreadProjectCache(
                         threadID: thread.id,
-                        resolution: projectPath.map(ThreadProjectResolution.project(path:))
-                            ?? .workingDirectory(
-                                path: ProjectDirectoryTree.normalizedPath(thread.cwd)
-                            ),
+                        resolution: resolution,
                         analyzedUpdatedAt: thread.updatedAt,
-                        classifierVersion: Self.projectClassifierVersion
+                        classifierVersion: ThreadProjectClassification.classifierVersion
                     )
 
                     guard !Task.isCancelled,

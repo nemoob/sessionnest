@@ -375,6 +375,37 @@ import Testing
                 classifierVersion: 1
             )
         ) == false)
+    #expect(
+        ThreadProjectClassification.needsAnalysis(
+            thread: thread,
+            cached: ThreadProjectCache(
+                threadID: thread.id,
+                resolution: .project(path: "/work/codex"),
+                analyzedUpdatedAt: thread.updatedAt,
+                classifierVersion: 0
+            )
+        ))
+}
+
+@Test func scratchWorkspaceWithoutCurrentCacheIsProvisionallyNoProject() {
+    let thread = directoryThread(
+        "scratch",
+        cwd: "/Users/me/Documents/Codex/2026-07-18/session",
+        updatedAt: 4
+    )
+
+    #expect(
+        ThreadProjectClassification.effectiveResolution(for: thread, cached: nil) == .noProject
+    )
+}
+
+@Test func normalWorkspaceWithoutCurrentCacheUsesWorkingDirectory() {
+    let thread = directoryThread("normal", cwd: "/work/app/../app", updatedAt: 4)
+
+    #expect(
+        ThreadProjectClassification.effectiveResolution(for: thread, cached: nil)
+            == .workingDirectory(path: "/work/app")
+    )
 }
 
 @Test func unknownProjectFallsBackToRawWorkingDirectory() {

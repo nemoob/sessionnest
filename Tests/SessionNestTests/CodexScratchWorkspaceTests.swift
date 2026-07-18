@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import SessionNest
@@ -83,6 +84,94 @@ struct CodexScratchWorkspaceTests {
             CodexScratchWorkspaceDetector.sessionRoot(
                 for: "Codex/2026-07-18/session"
             ) == nil
+        )
+    }
+
+    @Test func discoversDirectAndEvidenceDerivedRepositoriesWithinSession() throws {
+        let fileManager = FileManager.default
+        let fixture = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: fixture) }
+        let session = fixture.appendingPathComponent("Codex/2026-07-18/session")
+        let direct = session.appendingPathComponent("direct")
+        let deep = session.appendingPathComponent("nested/deep")
+        let deepFile = deep.appendingPathComponent("Sources/App.swift")
+        let outside = fixture.appendingPathComponent("outside")
+        try fileManager.createDirectory(
+            at: direct.appendingPathComponent(".git"),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: deep.appendingPathComponent(".git"),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: deepFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        #expect(fileManager.createFile(atPath: deepFile.path, contents: Data()))
+        try fileManager.createDirectory(
+            at: outside.appendingPathComponent(".git"),
+            withIntermediateDirectories: true
+        )
+
+        let repositories = try ThreadProjectScanner.scratchGitRepositories(
+            in: session.path,
+            evidence: ThreadProjectEvidence(
+                filePaths: [deepFile.path, outside.appendingPathComponent("file.txt").path],
+                commandWorkingDirectories: [],
+                commandActionPaths: [],
+                userMessages: [],
+                agentMessages: []
+            ),
+            fileManager: fileManager
+        )
+
+        #expect(repositories == [deep.path, direct.path].sorted())
+    }
+
+    @Test func discoversSessionRootWhenItIsARepository() throws {
+        let fileManager = FileManager.default
+        let fixture = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: fixture) }
+        let session = fixture.appendingPathComponent("Codex/2026-07-18/session")
+        try fileManager.createDirectory(
+            at: session.appendingPathComponent(".git"),
+            withIntermediateDirectories: true
+        )
+
+        let repositories = try ThreadProjectScanner.scratchGitRepositories(
+            in: session.path,
+            evidence: ThreadProjectEvidence(
+                filePaths: [],
+                commandWorkingDirectories: [session.path],
+                commandActionPaths: [],
+                userMessages: [],
+                agentMessages: []
+            ),
+            fileManager: fileManager
+        )
+
+        #expect(repositories == [session.path])
+    }
+
+    @Test func missingScratchDirectoryHasNoRepositoryCandidates() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("Codex/2026-07-18/session")
+
+        #expect(
+            try ThreadProjectScanner.scratchGitRepositories(
+                in: missing.path,
+                evidence: ThreadProjectEvidence(
+                    filePaths: [],
+                    commandWorkingDirectories: [],
+                    commandActionPaths: [],
+                    userMessages: [],
+                    agentMessages: []
+                )
+            ).isEmpty
         )
     }
 }
