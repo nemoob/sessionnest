@@ -77,6 +77,36 @@ struct ThreadProjectClassifierTests {
         #expect(classify(userText: "sample-app sample-api") == nil)
     }
 
+    @Test func canonicalizesLinkedWorktreeCandidateToMainRepository() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let main = root.appendingPathComponent("DBBridge")
+        let linked = root.appendingPathComponent("workspace/DBBridge")
+        let linkedGitDirectory = main.appendingPathComponent(".git/worktrees/DBBridge2")
+        try fileManager.createDirectory(at: linkedGitDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: linked, withIntermediateDirectories: true)
+        try Data("../..\n".utf8).write(to: linkedGitDirectory.appendingPathComponent("commondir"))
+        try Data("gitdir: \(linkedGitDirectory.path)\n".utf8).write(
+            to: linked.appendingPathComponent(".git")
+        )
+
+        let result = ThreadProjectClassifier.classify(
+            evidence: ThreadProjectEvidence(
+                filePaths: [linked.appendingPathComponent("main.go").path],
+                commandWorkingDirectories: [],
+                commandActionPaths: [],
+                userMessages: [],
+                agentMessages: []
+            ),
+            candidates: [linked.path],
+            fileManager: fileManager
+        )
+
+        #expect(result == main.path)
+    }
+
     private func classify(
         filePath: String? = nil,
         commandCWD: String? = nil,

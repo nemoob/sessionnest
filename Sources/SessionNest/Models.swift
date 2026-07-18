@@ -2,6 +2,12 @@ import Foundation
 
 struct GitInfo: Codable, Equatable, Sendable {
     let branch: String?
+    let originUrl: String?
+
+    init(branch: String?, originUrl: String? = nil) {
+        self.branch = branch
+        self.originUrl = originUrl
+    }
 }
 
 struct CodexThread: Codable, Identifiable, Equatable, Sendable {

@@ -42,6 +42,7 @@ enum SessionStatistics {
         coveredThreadIDs: Set<String>,
         dailyUsage: [ThreadTokenDailyUsage],
         threadProjects: [String: ThreadProjectCache],
+        projectIdentityIndex: ThreadProjectIdentityIndex = .empty,
         timeFilter: SessionTimeFilter,
         calendar: Calendar,
         now: Int64
@@ -51,6 +52,7 @@ enum SessionStatistics {
             coveredThreadIDs: coveredThreadIDs,
             dailyUsage: dailyUsage,
             threadProjects: threadProjects,
+            projectIdentityIndex: projectIdentityIndex,
             cutoff: cutoff(for: timeFilter, calendar: calendar, now: now),
             calendar: calendar,
             now: now
@@ -62,6 +64,7 @@ enum SessionStatistics {
         coveredThreadIDs: Set<String>,
         timedUsage: [ThreadTokenTimedUsage],
         threadProjects: [String: ThreadProjectCache],
+        projectIdentityIndex: ThreadProjectIdentityIndex = .empty,
         startingAt cutoff: Int64,
         calendar: Calendar,
         now: Int64
@@ -99,6 +102,7 @@ enum SessionStatistics {
             coveredThreadIDs: coveredThreadIDs,
             dailyUsage: dailyUsage,
             threadProjects: threadProjects,
+            projectIdentityIndex: projectIdentityIndex,
             cutoff: startDay,
             calendar: calendar,
             now: now
@@ -110,6 +114,7 @@ enum SessionStatistics {
         coveredThreadIDs: Set<String>,
         dailyUsage: [ThreadTokenDailyUsage],
         threadProjects: [String: ThreadProjectCache],
+        projectIdentityIndex: ThreadProjectIdentityIndex = .empty,
         startingAt cutoff: Int64,
         calendar: Calendar,
         now: Int64
@@ -119,6 +124,7 @@ enum SessionStatistics {
             coveredThreadIDs: coveredThreadIDs,
             dailyUsage: dailyUsage,
             threadProjects: threadProjects,
+            projectIdentityIndex: projectIdentityIndex,
             cutoff: cutoff,
             calendar: calendar,
             now: now
@@ -130,6 +136,7 @@ enum SessionStatistics {
         coveredThreadIDs: Set<String>,
         dailyUsage: [ThreadTokenDailyUsage],
         threadProjects: [String: ThreadProjectCache],
+        projectIdentityIndex: ThreadProjectIdentityIndex,
         cutoff: Int64?,
         calendar: Calendar,
         now: Int64
@@ -166,7 +173,8 @@ enum SessionStatistics {
         let sessionRows = measuredThreadByID.map { threadID, thread in
             let resolution = ThreadProjectClassification.effectiveResolution(
                 for: thread,
-                cached: threadProjects[threadID]
+                cached: threadProjects[threadID],
+                projectIdentityIndex: projectIdentityIndex
             )
             let projectPath = resolution.projectPath
             return StatisticsSessionRow(

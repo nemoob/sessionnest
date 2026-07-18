@@ -5,11 +5,12 @@ import Testing
 
 @Test func decodesThreadListResponse() throws {
     let data = Data(
-        #"{"data":[{"id":"t1","name":"Title","preview":"Preview","cwd":"/tmp/repo","createdAt":1,"updatedAt":2,"recencyAt":3,"gitInfo":{"branch":"test","originUrl":null,"sha":null}}],"nextCursor":null,"backwardsCursor":null}"#
+        #"{"data":[{"id":"t1","name":"Title","preview":"Preview","cwd":"/tmp/repo","createdAt":1,"updatedAt":2,"recencyAt":3,"gitInfo":{"branch":"test","originUrl":"ssh://git@example.com/team/repo.git","sha":null}}],"nextCursor":null,"backwardsCursor":null}"#
             .utf8)
     let page = try JSONDecoder().decode(ThreadPage.self, from: data)
     #expect(page.data.count == 1)
     #expect(page.data[0].displayTitle == "Title")
+    #expect(page.data[0].gitInfo?.originUrl == "ssh://git@example.com/team/repo.git")
     #expect(page.nextCursor == nil)
 }
 

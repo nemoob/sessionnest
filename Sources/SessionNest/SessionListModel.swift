@@ -64,14 +64,16 @@ struct ProjectDirectoryNode: Identifiable, Equatable {
 enum ProjectDirectoryTree {
     static func build(
         threads: [CodexThread],
-        threadProjects: [String: ThreadProjectCache]
+        threadProjects: [String: ThreadProjectCache],
+        projectIdentityIndex: ThreadProjectIdentityIndex = .empty
     ) -> [ProjectDirectoryNode] {
         let resolvedThreads = threads.map { thread in
             (
                 thread,
                 ThreadProjectClassification.effectiveResolution(
                     for: thread,
-                    cached: threadProjects[thread.id]
+                    cached: threadProjects[thread.id],
+                    projectIdentityIndex: projectIdentityIndex
                 )
             )
         }
@@ -82,8 +84,11 @@ enum ProjectDirectoryTree {
             let normalizedProjectPath = normalizedPath(projectPath)
             directCounts[normalizedProjectPath, default: 0] += 1
             includedPaths.insert(normalizedProjectPath)
-            if CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd) == nil {
-                includedPaths.insert(normalizedPath(thread.cwd))
+            let normalizedWorkingDirectory = normalizedPath(thread.cwd)
+            if CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd) == nil,
+                contains(path: normalizedProjectPath, in: normalizedWorkingDirectory)
+            {
+                includedPaths.insert(normalizedWorkingDirectory)
             }
         }
         let paths = Array(includedPaths)
@@ -134,11 +139,12 @@ enum ProjectDirectoryTree {
 }
 
 enum ThreadProjectClassification {
-    static let classifierVersion: Int64 = 1
+    static let classifierVersion: Int64 = 2
 
     static func effectiveResolution(
         for thread: CodexThread,
-        cached: ThreadProjectCache?
+        cached: ThreadProjectCache?,
+        projectIdentityIndex: ThreadProjectIdentityIndex = .empty
     ) -> ThreadProjectResolution {
         if let cached,
             cached.analyzedUpdatedAt >= thread.updatedAt,
@@ -148,6 +154,9 @@ enum ThreadProjectClassification {
         }
         if CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd) != nil {
             return .noProject
+        }
+        if let canonicalProjectPath = projectIdentityIndex.canonicalProjectPath(for: thread) {
+            return .project(path: ProjectDirectoryTree.normalizedPath(canonicalProjectPath))
         }
         return .workingDirectory(path: ProjectDirectoryTree.normalizedPath(thread.cwd))
     }
@@ -255,6 +264,7 @@ enum SessionFilter {
         tags: [SessionTag],
         threadTags: [String: Set<String>],
         threadProjects: [String: ThreadProjectCache],
+        projectIdentityIndex: ThreadProjectIdentityIndex = .empty,
         selection: SidebarSelection,
         query: String,
         timeFilter: SessionTimeFilter,
@@ -279,7 +289,8 @@ enum SessionFilter {
                 tags: attachedTags,
                 projectResolution: ThreadProjectClassification.effectiveResolution(
                     for: thread,
-                    cached: threadProjects[thread.id]
+                    cached: threadProjects[thread.id],
+                    projectIdentityIndex: projectIdentityIndex
                 )
             )
         }
@@ -380,6 +391,7 @@ final class SessionListModel: ObservableObject {
     @Published var tags: [SessionTag] = []
     @Published var threadTags: [String: Set<String>] = [:]
     @Published var threadProjects: [String: ThreadProjectCache] = [:]
+    @Published private(set) var projectIdentityIndex: ThreadProjectIdentityIndex = .empty
     @Published var threadTokenCache: [String: ThreadTokenCache] = [:]
     @Published var threadTokenDailyUsage: [ThreadTokenDailyUsage] = []
     @Published private(set) var tokenCoveredThreadIDs: Set<String> = []
@@ -431,6 +443,7 @@ final class SessionListModel: ObservableObject {
             tags: tags,
             threadTags: threadTags,
             threadProjects: threadProjects,
+            projectIdentityIndex: projectIdentityIndex,
             selection: selection,
             query: query,
             timeFilter: timeFilter,
@@ -439,7 +452,11 @@ final class SessionListModel: ObservableObject {
     }
 
     var projectTree: [ProjectDirectoryNode] {
-        ProjectDirectoryTree.build(threads: activeThreads, threadProjects: threadProjects)
+        ProjectDirectoryTree.build(
+            threads: activeThreads,
+            threadProjects: threadProjects,
+            projectIdentityIndex: projectIdentityIndex
+        )
     }
 
     var statisticsSnapshot: StatisticsSnapshot {
@@ -452,6 +469,7 @@ final class SessionListModel: ObservableObject {
             coveredThreadIDs: tokenCoveredThreadIDs,
             dailyUsage: threadTokenDailyUsage,
             threadProjects: threadProjects,
+            projectIdentityIndex: projectIdentityIndex,
             timeFilter: timeFilter,
             calendar: .current,
             now: Int64(Date().timeIntervalSince1970)
@@ -534,6 +552,10 @@ final class SessionListModel: ObservableObject {
                 loadedThreadTokenCache,
                 loadedThreadTokenDailyUsage
             )
+            let allThreads = result.0.0 + result.0.1
+            let projectIdentityIndex = await Task.detached(priority: .utility) {
+                ThreadProjectIdentityIndex.build(threads: allThreads)
+            }.value
             let usageSnapshot =
                 threadReloadOperation == nil ? try? await client.readUsageSnapshot() : nil
             let accountSnapshot =
@@ -546,6 +568,7 @@ final class SessionListModel: ObservableObject {
             tags = result.3
             threadTags = result.4
             threadProjects = result.5
+            self.projectIdentityIndex = projectIdentityIndex
             threadTokenCache = result.6
             threadTokenDailyUsage = result.7
             tokenCoveredThreadIDs = ThreadTokenCoverage.validThreadIDs(
@@ -559,8 +582,11 @@ final class SessionListModel: ObservableObject {
             lastSuccessfulReloadAt = Date()
             errorMessage = nil
             await refreshQuotaCycleStatistics()
-            await startProjectClassification(for: result.0.0 + result.0.1)
-            await startTokenUsageScan(for: result.0.0 + result.0.1)
+            await startProjectClassification(
+                for: allThreads,
+                projectIdentityIndex: projectIdentityIndex
+            )
+            await startTokenUsageScan(for: allThreads)
         } catch {
             record(error, revision: revision)
         }
@@ -715,7 +741,10 @@ final class SessionListModel: ObservableObject {
         return revision
     }
 
-    private func startProjectClassification(for threads: [CodexThread]) async {
+    private func startProjectClassification(
+        for threads: [CodexThread],
+        projectIdentityIndex: ThreadProjectIdentityIndex
+    ) async {
         classificationReplacementRequest += 1
         let replacementRequest = classificationReplacementRequest
         let previousTask = classificationTask
@@ -762,6 +791,10 @@ final class SessionListModel: ObservableObject {
                                 evidence: evidence,
                                 candidates: candidates
                             ).map(ThreadProjectResolution.project(path:)) ?? .noProject
+                    } else if let canonicalProjectPath =
+                        projectIdentityIndex.canonicalProjectPath(for: thread)
+                    {
+                        resolution = .project(path: canonicalProjectPath)
                     } else {
                         let candidates = try ThreadProjectScanner.directChildGitRepositories(
                             in: thread.cwd
@@ -1024,6 +1057,7 @@ final class SessionListModel: ObservableObject {
                 coveredThreadIDs: tokenCoveredThreadIDs,
                 timedUsage: timedUsage,
                 threadProjects: threadProjects,
+                projectIdentityIndex: projectIdentityIndex,
                 startingAt: start,
                 calendar: calendar,
                 now: now

@@ -66,6 +66,11 @@ workspaces shaped like `Codex/YYYY-MM-DD/<session>`. A scratch workspace is assi
 project only when local session evidence identifies one reliably; otherwise it appears under
 **无项目** and stays out of the project directory tree.
 
+Linked Git worktrees are grouped under their main working tree by resolving Git's shared common
+directory. If a Codex-managed worktree has already been removed, SessionNest uses its recorded Git
+origin only when that origin maps to exactly one live local repository; ambiguous clones remain
+separate instead of being merged by directory name.
+
 ## Local data and migration
 
 SessionNest stores favorites, collections, tags, inferred project caches, and Token statistics in:

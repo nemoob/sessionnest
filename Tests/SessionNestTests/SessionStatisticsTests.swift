@@ -265,13 +265,13 @@ struct SessionStatisticsTests {
                 threadID: alpha.id,
                 resolution: .project(path: "/work/projects/Zeta"),
                 analyzedUpdatedAt: now,
-                classifierVersion: 1
+                classifierVersion: ThreadProjectClassification.classifierVersion
             ),
             beta.id: ThreadProjectCache(
                 threadID: beta.id,
                 resolution: .project(path: "/work/projects/Alpha"),
                 analyzedUpdatedAt: now,
-                classifierVersion: 1
+                classifierVersion: ThreadProjectClassification.classifierVersion
             ),
         ]
 
@@ -311,6 +311,48 @@ struct SessionStatisticsTests {
         #expect(snapshot.sessionRows.map(\.usage.totalTokens) == [120, 120])
     }
 
+    @Test func aggregatesMainAndLinkedWorktreeUsageIntoOneProject() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let main = root.appendingPathComponent("DBBridge")
+        let commonGitDirectory = main.appendingPathComponent(".git")
+        let linked = root.appendingPathComponent(".codex/worktrees/abcd/DBBridge")
+        let linkedGitDirectory = commonGitDirectory.appendingPathComponent("worktrees/DBBridge2")
+        try fileManager.createDirectory(at: linkedGitDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: linked, withIntermediateDirectories: true)
+        try Data("../..\n".utf8).write(to: linkedGitDirectory.appendingPathComponent("commondir"))
+        try Data("gitdir: \(linkedGitDirectory.path)\n".utf8).write(
+            to: linked.appendingPathComponent(".git")
+        )
+        let mainThread = thread("main", cwd: main.path, activityTimestamp: 100)
+        let linkedThread = thread("linked", cwd: linked.path, activityTimestamp: 100)
+        let threads = [mainThread, linkedThread]
+        let identityIndex = ThreadProjectIdentityIndex.build(
+            threads: threads,
+            fileManager: fileManager
+        )
+
+        let snapshot = SessionStatistics.build(
+            threads: threads,
+            coveredThreadIDs: Set(threads.map(\.id)),
+            dailyUsage: [
+                daily(mainThread.id, day: 100, usage: usage(80, 50, 20, 10, 100)),
+                daily(linkedThread.id, day: 100, usage: usage(40, 20, 10, 5, 50)),
+            ],
+            threadProjects: [:],
+            projectIdentityIndex: identityIndex,
+            timeFilter: .all,
+            calendar: calendar(timeZone: "UTC"),
+            now: 1_000
+        )
+
+        #expect(snapshot.projectRows.map(\.projectPath) == [main.path])
+        #expect(snapshot.projectRows.map(\.usage.totalTokens) == [150])
+        #expect(Set(snapshot.sessionRows.compactMap(\.projectPath)) == Set([main.path]))
+    }
+
     @Test func noProjectUsageStaysInTotalsButIsExcludedFromProjectRanking() {
         let projectThread = thread(
             "project",
@@ -329,13 +371,13 @@ struct SessionStatisticsTests {
                 threadID: projectThread.id,
                 resolution: .project(path: "/work/project"),
                 analyzedUpdatedAt: 100,
-                classifierVersion: 1
+                classifierVersion: ThreadProjectClassification.classifierVersion
             ),
             noProjectThread.id: ThreadProjectCache(
                 threadID: noProjectThread.id,
                 resolution: .noProject,
                 analyzedUpdatedAt: 100,
-                classifierVersion: 1
+                classifierVersion: ThreadProjectClassification.classifierVersion
             ),
         ]
 

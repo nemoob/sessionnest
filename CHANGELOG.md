@@ -1,5 +1,9 @@
 # CHANGELOG
 
+### v0.2.1(20260718)
+#### bugFix:
+1. 修复 Codex linked worktree 按各自绝对路径重复显示同名项目的问题，改为依据 Git common directory 合并到主工作树，并在远端仓库身份唯一时归并已删除 worktree 的历史会话
+
 ### v0.2.0(20260718)
 #### feature:
 1. 新增 Codex 临时会话工作区自动识别，严格匹配 `Codex/YYYY-MM-DD/<会话目录>` 路径，并提供“无项目”侧栏入口集中查看未关联项目的会话
