@@ -67,6 +67,21 @@ struct ThreadProjectEvidence: Equatable, Sendable {
     var agentMessages: Set<String>
 }
 
+enum ThreadProjectResolution: Equatable, Sendable {
+    case project(path: String)
+    case workingDirectory(path: String)
+    case noProject
+
+    var projectPath: String? {
+        switch self {
+        case .project(let path), .workingDirectory(let path): path
+        case .noProject: nil
+        }
+    }
+
+    var isNoProject: Bool { self == .noProject }
+}
+
 struct ThreadProjectCache: Equatable, Sendable {
     let threadID: String
     let projectPath: String?
