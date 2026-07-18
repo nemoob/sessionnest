@@ -63,6 +63,7 @@ struct TokenUsageBreakdown: Codable, Equatable, Sendable {
 struct TokenScanState: Equatable, Sendable {
     var maximum: TokenUsageBreakdown
     var dailyUsage: [Int64: TokenUsageBreakdown]
+    var timedUsage: [Int64: TokenUsageBreakdown] = [:]
     var latestEventTimestamp: Int64?
     var observedCheckpoint: Bool
 
@@ -80,6 +81,7 @@ struct TokenScanResult: Equatable, Sendable {
 
     var maximum: TokenUsageBreakdown { state.maximum }
     var dailyUsage: [Int64: TokenUsageBreakdown] { state.dailyUsage }
+    var timedUsage: [Int64: TokenUsageBreakdown] { state.timedUsage }
     var latestEventTimestamp: Int64? { state.latestEventTimestamp }
     var observedCheckpoint: Bool { state.observedCheckpoint }
 }
@@ -174,11 +176,13 @@ enum RolloutTokenScanner {
         else { return }
 
         let delta = usage.positiveDelta(from: state.maximum)
+        let timestampSeconds = Int64(timestamp.timeIntervalSince1970.rounded(.down))
         if !delta.isZero {
             let day = Int64(calendar.startOfDay(for: timestamp).timeIntervalSince1970)
             state.dailyUsage[day] = (state.dailyUsage[day] ?? .zero) + delta
+            state.timedUsage[timestampSeconds] =
+                (state.timedUsage[timestampSeconds] ?? .zero) + delta
         }
-        let timestampSeconds = Int64(timestamp.timeIntervalSince1970.rounded(.down))
         state.maximum = state.maximum.componentwiseMaximum(usage)
         state.latestEventTimestamp = max(
             state.latestEventTimestamp ?? timestampSeconds, timestampSeconds)

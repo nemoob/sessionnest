@@ -410,7 +410,7 @@ final class SessionListModel: ObservableObject {
     private var reloadTask: Task<Void, Never>?
     private var rateLimitRefreshTask: Task<Void, Never>?
 
-    private static let tokenParserVersion: Int64 = 1
+    private static let tokenParserVersion: Int64 = 2
     static let automaticRefreshInterval: TimeInterval = 15 * 60
 
     var totalSessionCount: Int {

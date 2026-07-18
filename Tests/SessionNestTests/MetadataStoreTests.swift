@@ -290,6 +290,114 @@ import Testing
         ])
 }
 
+@Test func tokenTimedUsageFiltersExactBoundariesAndRebuildsPerThread() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    let store = try MetadataStore(databaseURL: databaseURL)
+    let beforeBoundary: Int64 = 1_768_700_691
+    let boundary: Int64 = 1_768_700_692
+    let later: Int64 = 1_768_700_700
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/measured.jsonl",
+        fileSize: 300,
+        fileModificationTimeNS: 400,
+        parserVersion: 2,
+        result: tokenScanResult(
+            offset: 250,
+            maximum: tokenUsage(30, 12, 8, 4, 38),
+            dailyUsage: [
+                1_768_694_400: tokenUsage(30, 12, 8, 4, 38)
+            ],
+            timedUsage: [
+                beforeBoundary: tokenUsage(10, 4, 2, 1, 12),
+                boundary: tokenUsage(20, 8, 6, 3, 26),
+            ],
+            latestEventTimestamp: boundary
+        ),
+        rebuild: false
+    )
+    try await store.saveThreadTokenScan(
+        threadID: "other",
+        rolloutPath: "/rollout/other.jsonl",
+        fileSize: 100,
+        fileModificationTimeNS: 200,
+        parserVersion: 2,
+        result: tokenScanResult(
+            offset: 90,
+            maximum: tokenUsage(5, 2, 1, 0, 6),
+            dailyUsage: [1_768_694_400: tokenUsage(5, 2, 1, 0, 6)],
+            timedUsage: [boundary: tokenUsage(5, 2, 1, 0, 6)],
+            latestEventTimestamp: boundary
+        ),
+        rebuild: false
+    )
+
+    #expect(
+        try await store.loadThreadTokenTimedUsage(startingAt: boundary, endingAt: boundary) == [
+            ThreadTokenTimedUsage(
+                threadID: "measured",
+                eventAt: boundary,
+                usage: tokenUsage(20, 8, 6, 3, 26)
+            ),
+            ThreadTokenTimedUsage(
+                threadID: "other",
+                eventAt: boundary,
+                usage: tokenUsage(5, 2, 1, 0, 6)
+            ),
+        ])
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/rebuilt.jsonl",
+        fileSize: 150,
+        fileModificationTimeNS: 500,
+        parserVersion: 2,
+        result: tokenScanResult(
+            offset: 140,
+            maximum: tokenUsage(7, 3, 2, 1, 9),
+            dailyUsage: [1_768_694_400: tokenUsage(7, 3, 2, 1, 9)],
+            timedUsage: [later: tokenUsage(7, 3, 2, 1, 9)],
+            latestEventTimestamp: later
+        ),
+        rebuild: true
+    )
+
+    #expect(
+        try await store.loadThreadTokenTimedUsage(
+            startingAt: beforeBoundary,
+            endingAt: later
+        ) == [
+            ThreadTokenTimedUsage(
+                threadID: "measured",
+                eventAt: later,
+                usage: tokenUsage(7, 3, 2, 1, 9)
+            ),
+            ThreadTokenTimedUsage(
+                threadID: "other",
+                eventAt: boundary,
+                usage: tokenUsage(5, 2, 1, 0, 6)
+            ),
+        ])
+
+    var database: OpaquePointer?
+    #expect(sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+    guard let database else { return }
+    defer { sqlite3_close(database) }
+    #expect(
+        tableColumns("thread_token_daily", in: database) == [
+            "thread_id", "day_start", "input_tokens", "cached_input_tokens",
+            "output_tokens", "reasoning_output_tokens", "total_tokens",
+        ])
+    #expect(
+        tableColumns("thread_token_timed", in: database) == [
+            "thread_id", "event_at", "input_tokens", "cached_input_tokens",
+            "output_tokens", "reasoning_output_tokens", "total_tokens",
+        ])
+}
+
 @Test func tokenUsageCacheDoesNotFabricateUncoveredThreads() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -478,6 +586,7 @@ private func tokenScanResult(
     offset: Int64,
     maximum: TokenUsageBreakdown,
     dailyUsage: [Int64: TokenUsageBreakdown],
+    timedUsage: [Int64: TokenUsageBreakdown] = [:],
     latestEventTimestamp: Int64?,
     observedCheckpoint: Bool = true
 ) -> TokenScanResult {
@@ -486,6 +595,7 @@ private func tokenScanResult(
         state: TokenScanState(
             maximum: maximum,
             dailyUsage: dailyUsage,
+            timedUsage: timedUsage,
             latestEventTimestamp: latestEventTimestamp,
             observedCheckpoint: observedCheckpoint
         )

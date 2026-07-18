@@ -55,6 +55,27 @@ struct ThreadTokenUsageTests {
             ])
     }
 
+    @Test func preservesSecondLevelDeltasAlongsideDailyTotals() throws {
+        let lines = [
+            #"{"timestamp":"2026-07-18T03:24:51.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":120}}}}"#,
+            #"{"timestamp":"2026-07-18T03:24:52.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"cached_input_tokens":90,"output_tokens":30,"reasoning_output_tokens":15,"total_tokens":160}}}}"#,
+            #"{"timestamp":"2026-07-18T03:24:52.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":100,"output_tokens":40,"reasoning_output_tokens":20,"total_tokens":190}}}}"#,
+        ]
+        let url = try fixture(data: Data((lines.joined(separator: "\n") + "\n").utf8))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try RolloutTokenScanner.scan(url: url, calendar: localCalendar)
+        let beforeReset = unixSeconds("2026-07-18T03:24:51.000Z")
+        let resetSecond = unixSeconds("2026-07-18T03:24:52.000Z")
+
+        #expect(
+            result.timedUsage == [
+                beforeReset: usage(100, 80, 20, 10, 120),
+                resetSecond: usage(50, 20, 20, 10, 70),
+            ])
+        #expect(result.dailyUsage.values.reduce(.zero, +) == usage(150, 100, 40, 20, 190))
+    }
+
     @Test func resumesFromCommittedOffsetAndBaseline() throws {
         let firstLine =
             #"{"timestamp":"2026-07-13T15:59:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":5,"output_tokens":2,"reasoning_output_tokens":1,"total_tokens":12}}}}"#

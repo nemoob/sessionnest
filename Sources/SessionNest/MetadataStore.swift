@@ -24,6 +24,12 @@ struct ThreadTokenDailyUsage: Equatable, Sendable {
     let usage: TokenUsageBreakdown
 }
 
+struct ThreadTokenTimedUsage: Equatable, Sendable {
+    let threadID: String
+    let eventAt: Int64
+    let usage: TokenUsageBreakdown
+}
+
 actor MetadataStore {
     nonisolated(unsafe) private let database: OpaquePointer
 
@@ -263,6 +269,47 @@ actor MetadataStore {
         }
     }
 
+    func loadThreadTokenTimedUsage(
+        startingAt start: Int64,
+        endingAt end: Int64
+    ) throws -> [ThreadTokenTimedUsage] {
+        let statement = try prepare(
+            """
+            SELECT thread_id, event_at, input_tokens, cached_input_tokens,
+                   output_tokens, reasoning_output_tokens, total_tokens
+            FROM thread_token_timed
+            WHERE event_at >= ? AND event_at <= ?
+            ORDER BY thread_id, event_at
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(start, to: 1, in: statement)
+        try bind(end, to: 2, in: statement)
+
+        var timedUsage: [ThreadTokenTimedUsage] = []
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                timedUsage.append(
+                    ThreadTokenTimedUsage(
+                        threadID: text(at: 0, in: statement),
+                        eventAt: sqlite3_column_int64(statement, 1),
+                        usage: TokenUsageBreakdown(
+                            inputTokens: sqlite3_column_int64(statement, 2),
+                            cachedInputTokens: sqlite3_column_int64(statement, 3),
+                            outputTokens: sqlite3_column_int64(statement, 4),
+                            reasoningOutputTokens: sqlite3_column_int64(statement, 5),
+                            totalTokens: sqlite3_column_int64(statement, 6)
+                        )
+                    ))
+            case SQLITE_DONE:
+                return timedUsage
+            default:
+                throw sqliteError()
+            }
+        }
+    }
+
     func saveThreadProject(_ project: ThreadProjectCache) throws {
         let stored = Self.storedProjectResolution(project.resolution)
         let statement = try prepare(
@@ -316,17 +363,19 @@ actor MetadataStore {
         try execute("BEGIN")
         do {
             if rebuild {
-                let deleteStatement = try prepare(
-                    "DELETE FROM thread_token_daily WHERE thread_id = ?"
-                )
-                do {
-                    try bind(threadID, to: 1, in: deleteStatement)
-                    try finish(deleteStatement)
-                } catch {
+                for table in ["thread_token_daily", "thread_token_timed"] {
+                    let deleteStatement = try prepare(
+                        "DELETE FROM \(table) WHERE thread_id = ?"
+                    )
+                    do {
+                        try bind(threadID, to: 1, in: deleteStatement)
+                        try finish(deleteStatement)
+                    } catch {
+                        sqlite3_finalize(deleteStatement)
+                        throw error
+                    }
                     sqlite3_finalize(deleteStatement)
-                    throw error
                 }
-                sqlite3_finalize(deleteStatement)
 
                 if !result.observedCheckpoint {
                     let deleteCacheStatement = try prepare(
@@ -413,6 +462,38 @@ actor MetadataStore {
                 throw error
             }
             sqlite3_finalize(dailyStatement)
+
+            let timedStatement = try prepare(
+                """
+                INSERT INTO thread_token_timed (
+                  thread_id, event_at, input_tokens, cached_input_tokens,
+                  output_tokens, reasoning_output_tokens, total_tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id, event_at) DO UPDATE SET
+                  input_tokens = thread_token_timed.input_tokens + excluded.input_tokens,
+                  cached_input_tokens = thread_token_timed.cached_input_tokens + excluded.cached_input_tokens,
+                  output_tokens = thread_token_timed.output_tokens + excluded.output_tokens,
+                  reasoning_output_tokens = thread_token_timed.reasoning_output_tokens + excluded.reasoning_output_tokens,
+                  total_tokens = thread_token_timed.total_tokens + excluded.total_tokens
+                """
+            )
+            do {
+                for (eventAt, usage) in result.timedUsage where !usage.isZero {
+                    guard sqlite3_reset(timedStatement) == SQLITE_OK,
+                        sqlite3_clear_bindings(timedStatement) == SQLITE_OK
+                    else {
+                        throw sqliteError()
+                    }
+                    try bind(threadID, to: 1, in: timedStatement)
+                    try bind(eventAt, to: 2, in: timedStatement)
+                    try bind(usage, startingAt: 3, in: timedStatement)
+                    try finish(timedStatement)
+                }
+            } catch {
+                sqlite3_finalize(timedStatement)
+                throw error
+            }
+            sqlite3_finalize(timedStatement)
             try execute("COMMIT")
         } catch {
             let transactionError = error
@@ -583,6 +664,18 @@ actor MetadataStore {
               total_tokens INTEGER NOT NULL,
               PRIMARY KEY (thread_id, day_start)
             );
+            CREATE TABLE IF NOT EXISTS thread_token_timed (
+              thread_id TEXT NOT NULL,
+              event_at INTEGER NOT NULL,
+              input_tokens INTEGER NOT NULL,
+              cached_input_tokens INTEGER NOT NULL,
+              output_tokens INTEGER NOT NULL,
+              reasoning_output_tokens INTEGER NOT NULL,
+              total_tokens INTEGER NOT NULL,
+              PRIMARY KEY (thread_id, event_at)
+            );
+            CREATE INDEX IF NOT EXISTS thread_token_timed_event_at
+              ON thread_token_timed(event_at);
             """
         guard sqlite3_exec(database, schema, nil, nil, nil) == SQLITE_OK else {
             throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
