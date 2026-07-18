@@ -115,46 +115,17 @@ struct StatisticsDashboardView: View {
 
     private func dailyTrend(snapshot: StatisticsSnapshot) -> some View {
         dashboardSection(title: "Token 趋势", subtitle: "按本地自然日统计实际新增用量") {
-            Chart(snapshot.dailyPoints) { point in
-                LineMark(
-                    x: .value("日期", date(for: point.dayStart)),
-                    y: .value("Token", point.usage.totalTokens),
-                    series: .value("类型", "总 Token")
-                )
-                .foregroundStyle(by: .value("类型", "总 Token"))
-                .interpolationMethod(.monotone)
-
-                LineMark(
-                    x: .value("日期", date(for: point.dayStart)),
-                    y: .value("Token", point.usage.cachedInputTokens),
-                    series: .value("类型", "缓存输入")
-                )
-                .foregroundStyle(by: .value("类型", "缓存输入"))
-                .interpolationMethod(.monotone)
-            }
-            .chartForegroundStyleScale([
-                "总 Token": Color.accentColor,
-                "缓存输入": Color.orange,
-            ])
-            .chartYAxis {
-                AxisMarks(position: .leading) { value in
-                    AxisGridLine()
-                    AxisValueLabel {
-                        if let amount = value.as(Int64.self) {
-                            Text(compact(amount))
-                        }
-                    }
-                }
-            }
-            .frame(height: 230)
-            .accessibilityLabel("每日 Token 趋势")
+            TokenTrendChart(points: snapshot.dailyPoints, presentation: .dashboard)
         }
     }
 
     private func projectRanking(snapshot: StatisticsSnapshot) -> some View {
         let topProjects = Array(snapshot.projectRows.prefix(10))
 
-        return dashboardSection(title: "项目 Token 排行", subtitle: "当前时间范围内总 Token 最高的前 10 个项目") {
+        return dashboardSection(
+            title: "项目 Token 排行",
+            subtitle: "当前时间范围内总 Token 最高的前 10 个项目；不含“无项目”会话"
+        ) {
             Chart(topProjects) { project in
                 BarMark(
                     x: .value("Token", project.usage.totalTokens),
@@ -215,7 +186,7 @@ struct StatisticsDashboardView: View {
                 TableColumn("项目") { row in
                     Text(row.projectName)
                         .lineLimit(1)
-                        .help(row.projectPath)
+                        .help(row.projectPath ?? row.workingDirectory)
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2) {
                             model.open(threadID: row.threadID)
@@ -357,9 +328,6 @@ struct StatisticsDashboardView: View {
         "\(value.formatted()) Token"
     }
 
-    private func date(for timestamp: Int64) -> Date {
-        Date(timeIntervalSince1970: TimeInterval(timestamp))
-    }
 }
 
 extension View {

@@ -33,6 +33,31 @@ struct CodexRateLimitWindow: Decodable, Equatable, Sendable {
     }
 }
 
+struct CodexRateLimitResetCredit: Decodable, Equatable, Identifiable, Sendable {
+    let id: String
+    let resetType: String
+    let status: String
+    let grantedAt: Int64
+    let expiresAt: Int64
+    let title: String
+    let description: String
+}
+
+struct CodexRateLimitResetCreditsSummary: Decodable, Equatable, Sendable {
+    let availableCount: Int
+    let credits: [CodexRateLimitResetCredit]
+}
+
+struct CodexUsageSnapshot: Decodable, Equatable, Sendable {
+    let rateLimits: CodexRateLimitSnapshot
+    let resetCredits: CodexRateLimitResetCreditsSummary?
+
+    private enum CodingKeys: String, CodingKey {
+        case rateLimits
+        case resetCredits = "rateLimitResetCredits"
+    }
+}
+
 enum CodexClientError: LocalizedError, Sendable {
     case executableNotFound
     case processStopped(String)
@@ -179,13 +204,17 @@ actor CodexClient {
     }
 
     func readRateLimits() async throws -> CodexRateLimitSnapshot {
+        try await readUsageSnapshot().rateLimits
+    }
+
+    func readUsageSnapshot() async throws -> CodexUsageSnapshot {
         let params: String? = nil
         let result = try await request(
             method: "account/rateLimits/read",
             params: params,
-            result: RateLimitsReadResult.self
+            result: CodexUsageSnapshot.self
         )
-        return result.rateLimits
+        return result
     }
 
     func readAccount() async throws -> CodexAccountSnapshot? {
@@ -444,10 +473,6 @@ private struct Capabilities: Encodable {
 
 private struct ThreadIDParams: Encodable {
     let threadId: String
-}
-
-private struct RateLimitsReadResult: Decodable {
-    let rateLimits: CodexRateLimitSnapshot
 }
 
 private struct AccountReadParams: Encodable {

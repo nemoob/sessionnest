@@ -21,6 +21,81 @@ enum ThreadProjectScanner {
             .map { ProjectDirectoryTree.normalizedPath($0.path) }
             .sorted()
     }
+
+    static func scratchGitRepositories(
+        in rootPath: String,
+        evidence: ThreadProjectEvidence,
+        fileManager: FileManager = .default
+    ) throws -> [String] {
+        let rootPath = ProjectDirectoryTree.normalizedPath(rootPath)
+        var repositories: Set<String> = []
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: rootPath, isDirectory: &isDirectory),
+            isDirectory.boolValue
+        {
+            if isGitRepository(rootPath, fileManager: fileManager) {
+                repositories.insert(rootPath)
+            }
+            repositories.formUnion(
+                try directChildGitRepositories(in: rootPath, fileManager: fileManager)
+            )
+        }
+
+        let evidencePaths =
+            evidence.filePaths
+            .union(evidence.commandWorkingDirectories)
+            .union(evidence.commandActionPaths)
+        for path in evidencePaths
+        where (path as NSString).isAbsolutePath
+            && ProjectDirectoryTree.contains(path: path, in: rootPath)
+        {
+            if let repository = nearestGitRepository(
+                containing: path,
+                boundedBy: rootPath,
+                fileManager: fileManager
+            ) {
+                repositories.insert(repository)
+            }
+        }
+
+        return repositories.sorted()
+    }
+
+    private static func nearestGitRepository(
+        containing path: String,
+        boundedBy rootPath: String,
+        fileManager: FileManager
+    ) -> String? {
+        let rootPath = ProjectDirectoryTree.normalizedPath(rootPath)
+        let normalizedPath = ProjectDirectoryTree.normalizedPath(path)
+        var isDirectory: ObjCBool = false
+        let exists = fileManager.fileExists(atPath: normalizedPath, isDirectory: &isDirectory)
+        var candidate =
+            exists && !isDirectory.boolValue
+            ? URL(fileURLWithPath: normalizedPath).deletingLastPathComponent().path
+            : normalizedPath
+
+        while ProjectDirectoryTree.contains(path: candidate, in: rootPath) {
+            if isGitRepository(candidate, fileManager: fileManager) {
+                return ProjectDirectoryTree.normalizedPath(candidate)
+            }
+            if candidate == rootPath { break }
+            let parent = URL(fileURLWithPath: candidate).deletingLastPathComponent().path
+            if parent == candidate { break }
+            candidate = parent
+        }
+        return nil
+    }
+
+    private static func isGitRepository(
+        _ path: String,
+        fileManager: FileManager
+    ) -> Bool {
+        fileManager.fileExists(
+            atPath: URL(fileURLWithPath: path, isDirectory: true)
+                .appendingPathComponent(".git").path
+        )
+    }
 }
 
 enum ThreadProjectClassifier {

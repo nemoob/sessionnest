@@ -63,6 +63,7 @@ struct TokenUsageBreakdown: Codable, Equatable, Sendable {
 struct TokenScanState: Equatable, Sendable {
     var maximum: TokenUsageBreakdown
     var dailyUsage: [Int64: TokenUsageBreakdown]
+    var timedUsage: [Int64: TokenUsageBreakdown] = [:]
     var latestEventTimestamp: Int64?
     var observedCheckpoint: Bool
 
@@ -80,15 +81,13 @@ struct TokenScanResult: Equatable, Sendable {
 
     var maximum: TokenUsageBreakdown { state.maximum }
     var dailyUsage: [Int64: TokenUsageBreakdown] { state.dailyUsage }
+    var timedUsage: [Int64: TokenUsageBreakdown] { state.timedUsage }
     var latestEventTimestamp: Int64? { state.latestEventTimestamp }
     var observedCheckpoint: Bool { state.observedCheckpoint }
 }
 
 enum QuotaCycleWindow {
-    static func startDay(
-        window: CodexRateLimitWindow?,
-        calendar: Calendar
-    ) -> Int64? {
+    static func startTimestamp(window: CodexRateLimitWindow?) -> Int64? {
         guard let durationMins = window?.windowDurationMins,
             durationMins > 0,
             let resetsAt = window?.resetsAt
@@ -97,40 +96,31 @@ enum QuotaCycleWindow {
         let (durationSeconds, durationOverflow) = durationMins.multipliedReportingOverflow(by: 60)
         let (cycleStart, startOverflow) = resetsAt.subtractingReportingOverflow(durationSeconds)
         guard !durationOverflow, !startOverflow else { return nil }
-
-        return Int64(
-            calendar.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(cycleStart)))
-                .timeIntervalSince1970
-        )
+        return cycleStart
     }
+
 }
 
 enum QuotaCycleTokenUsage {
     static func totalTokens(
-        dailyUsage: [ThreadTokenDailyUsage],
+        timedUsage: [ThreadTokenTimedUsage],
         coveredThreadIDs: Set<String>,
         knownThreadIDs: Set<String>,
         window: CodexRateLimitWindow?,
-        calendar: Calendar,
         now: Int64
     ) -> Int64? {
-        guard let startDay = QuotaCycleWindow.startDay(window: window, calendar: calendar)
-        else { return nil }
+        guard let start = QuotaCycleWindow.startTimestamp(window: window) else { return nil }
 
-        let currentDay = Int64(
-            calendar.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(now)))
-                .timeIntervalSince1970
-        )
-
-        return dailyUsage.lazy
+        return timedUsage.lazy
             .filter {
                 coveredThreadIDs.contains($0.threadID)
                     && knownThreadIDs.contains($0.threadID)
-                    && $0.dayStart >= startDay
-                    && $0.dayStart <= currentDay
+                    && $0.eventAt >= start
+                    && $0.eventAt <= now
             }
             .reduce(0) { $0 + $1.usage.totalTokens }
     }
+
 }
 
 enum RolloutTokenScanner {
@@ -174,11 +164,13 @@ enum RolloutTokenScanner {
         else { return }
 
         let delta = usage.positiveDelta(from: state.maximum)
+        let timestampSeconds = Int64(timestamp.timeIntervalSince1970.rounded(.down))
         if !delta.isZero {
             let day = Int64(calendar.startOfDay(for: timestamp).timeIntervalSince1970)
             state.dailyUsage[day] = (state.dailyUsage[day] ?? .zero) + delta
+            state.timedUsage[timestampSeconds] =
+                (state.timedUsage[timestampSeconds] ?? .zero) + delta
         }
-        let timestampSeconds = Int64(timestamp.timeIntervalSince1970.rounded(.down))
         state.maximum = state.maximum.componentwiseMaximum(usage)
         state.latestEventTimestamp = max(
             state.latestEventTimestamp ?? timestampSeconds, timestampSeconds)

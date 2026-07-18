@@ -256,7 +256,7 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
         return MenuBarStatus(
             totalSessions: model.totalSessionCount,
             measuredSessions: statistics.measuredSessionCount,
-            quotaCycleTokens: model.currentQuotaCycleTokenUsage(),
+            quotaCycleTokens: model.quotaCycleTokenUsage,
             rateLimits: model.rateLimitSnapshot,
             account: model.accountSnapshot,
             isLoading: model.isLoading,
@@ -315,7 +315,10 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
             )
             popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
             startOutsideClickMonitoring()
-            Task { await model.reloadIfStale() }
+            Task {
+                await model.refreshRateLimits()
+                await model.reloadIfStale()
+            }
         }
     }
 

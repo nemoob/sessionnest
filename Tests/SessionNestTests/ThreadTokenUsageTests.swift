@@ -55,6 +55,27 @@ struct ThreadTokenUsageTests {
             ])
     }
 
+    @Test func preservesSecondLevelDeltasAlongsideDailyTotals() throws {
+        let lines = [
+            #"{"timestamp":"2026-07-18T03:24:51.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":120}}}}"#,
+            #"{"timestamp":"2026-07-18T03:24:52.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"cached_input_tokens":90,"output_tokens":30,"reasoning_output_tokens":15,"total_tokens":160}}}}"#,
+            #"{"timestamp":"2026-07-18T03:24:52.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":100,"output_tokens":40,"reasoning_output_tokens":20,"total_tokens":190}}}}"#,
+        ]
+        let url = try fixture(data: Data((lines.joined(separator: "\n") + "\n").utf8))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try RolloutTokenScanner.scan(url: url, calendar: localCalendar)
+        let beforeReset = unixSeconds("2026-07-18T03:24:51.000Z")
+        let resetSecond = unixSeconds("2026-07-18T03:24:52.000Z")
+
+        #expect(
+            result.timedUsage == [
+                beforeReset: usage(100, 80, 20, 10, 120),
+                resetSecond: usage(50, 20, 20, 10, 70),
+            ])
+        #expect(result.dailyUsage.values.reduce(.zero, +) == usage(150, 100, 40, 20, 190))
+    }
+
     @Test func resumesFromCommittedOffsetAndBaseline() throws {
         let firstLine =
             #"{"timestamp":"2026-07-13T15:59:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":5,"output_tokens":2,"reasoning_output_tokens":1,"total_tokens":12}}}}"#
@@ -155,48 +176,43 @@ struct ThreadTokenUsageTests {
         #expect(decision(fileSize: 100, modificationTime: laterNanoseconds) == .rebuild)
     }
 
-    @Test func quotaCycleStartDayUsesLocalMidnightBeforeNonMidnightReset() {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    @Test func quotaCycleStartTimestampPreservesNonMidnightBoundary() {
         let window = CodexRateLimitWindow(
             usedPercent: 6,
             windowDurationMins: 10_080,
             resetsAt: unixSeconds("2026-07-22T14:30:00Z")
         )
 
-        let startDay = QuotaCycleWindow.startDay(window: window, calendar: calendar)
+        let startTimestamp = QuotaCycleWindow.startTimestamp(window: window)
 
-        #expect(startDay == unixSeconds("2026-07-15T00:00:00Z"))
+        #expect(startTimestamp == unixSeconds("2026-07-15T14:30:00Z"))
     }
 
-    @Test func quotaCycleTokenUsageIncludesOnlyCoveredKnownRowsInCycleDays() {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let now = unixSeconds("2026-07-15T12:00:00Z")
+    @Test func quotaCycleTokenUsageFiltersExactBoundaryAndCoveredThreads() {
+        let now = unixSeconds("2026-07-15T14:31:00Z")
         let window = CodexRateLimitWindow(
             usedPercent: 40,
             windowDurationMins: 10_080,
-            resetsAt: unixSeconds("2026-07-20T12:00:00Z")
+            resetsAt: unixSeconds("2026-07-22T14:30:00Z")
         )
-        let dailyUsage = [
-            daily("covered", "2026-07-12T00:00:00Z", 1, calendar: calendar),
-            daily("covered", "2026-07-13T00:00:00Z", 10, calendar: calendar),
-            daily("covered", "2026-07-15T00:00:00Z", 20, calendar: calendar),
-            daily("covered", "2026-07-16T00:00:00Z", 40, calendar: calendar),
-            daily("uncovered", "2026-07-14T00:00:00Z", 100, calendar: calendar),
-            daily("unknown", "2026-07-14T00:00:00Z", 1_000, calendar: calendar),
+        let timedUsage = [
+            timed("covered", "2026-07-15T14:29:59Z", 10),
+            timed("covered", "2026-07-15T14:30:00Z", 20),
+            timed("covered", "2026-07-15T14:31:00Z", 30),
+            timed("covered", "2026-07-15T14:31:01Z", 40),
+            timed("uncovered", "2026-07-15T14:30:30Z", 100),
+            timed("unknown", "2026-07-15T14:30:30Z", 1_000),
         ]
 
         let total = QuotaCycleTokenUsage.totalTokens(
-            dailyUsage: dailyUsage,
+            timedUsage: timedUsage,
             coveredThreadIDs: ["covered", "unknown"],
             knownThreadIDs: ["covered", "uncovered"],
             window: window,
-            calendar: calendar,
             now: now
         )
 
-        #expect(total == 30)
+        #expect(total == 50)
     }
 
     @Test func quotaCycleTokenUsageRequiresCompleteWindowMetadata() {
@@ -207,11 +223,10 @@ struct ThreadTokenUsageTests {
         )
 
         let total = QuotaCycleTokenUsage.totalTokens(
-            dailyUsage: [],
+            timedUsage: [],
             coveredThreadIDs: [],
             knownThreadIDs: [],
             window: missingReset,
-            calendar: .current,
             now: 1_000
         )
 
@@ -252,15 +267,14 @@ struct ThreadTokenUsageTests {
         Int64(calendar.startOfDay(for: timestamp(value)).timeIntervalSince1970)
     }
 
-    private func daily(
+    private func timed(
         _ threadID: String,
         _ date: String,
-        _ totalTokens: Int64,
-        calendar: Calendar
-    ) -> ThreadTokenDailyUsage {
-        ThreadTokenDailyUsage(
+        _ totalTokens: Int64
+    ) -> ThreadTokenTimedUsage {
+        ThreadTokenTimedUsage(
             threadID: threadID,
-            dayStart: dayStart(date, calendar: calendar),
+            eventAt: unixSeconds(date),
             usage: usage(0, 0, 0, 0, totalTokens)
         )
     }

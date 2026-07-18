@@ -247,6 +247,7 @@ private struct GitHubMarkShape: Shape {
 
 private enum StatusPopoverPage {
     case overview
+    case resetCredits
     case settings
 }
 
@@ -265,6 +266,8 @@ struct SessionNestStatusPopover: View {
             switch page {
             case .overview:
                 overview
+            case .resetCredits:
+                resetCredits
             case .settings:
                 settings
             }
@@ -279,13 +282,13 @@ struct SessionNestStatusPopover: View {
 
     private var overview: some View {
         let statisticsScope = StatusPopoverStatisticsScope.resolve(
-            cycleSnapshot: model.currentQuotaCycleStatisticsSnapshot(),
+            cycleSnapshot: model.quotaCycleStatisticsSnapshot,
             fallbackSnapshot: model.statisticsSnapshot(for: .sevenDays)
         )
         let snapshot = statisticsScope.snapshot
         let status = MenuBarStatus(
             snapshot: snapshot,
-            quotaCycleTokens: model.currentQuotaCycleTokenUsage(),
+            quotaCycleTokens: model.quotaCycleTokenUsage,
             rateLimits: model.rateLimitSnapshot,
             account: model.accountSnapshot,
             isLoading: model.isLoading,
@@ -295,6 +298,7 @@ struct SessionNestStatusPopover: View {
             snapshot: snapshot,
             isScanningTokenUsage: model.isScanningTokenUsage
         )
+        let resetCredits = MenuBarResetCreditsStatus(summary: model.resetCreditsSnapshot)
 
         return ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -351,6 +355,7 @@ struct SessionNestStatusPopover: View {
                 Text("配额")
                     .font(.subheadline.weight(.semibold))
                 quotaRow(title: "每周", quota: status.weeklyQuota)
+                resetCreditsRow(resetCredits)
 
                 Text(statisticsScope.title)
                     .font(.subheadline.weight(.semibold))
@@ -488,6 +493,65 @@ struct SessionNestStatusPopover: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    private var resetCredits: some View {
+        let status = MenuBarResetCreditsStatus(summary: model.resetCreditsSnapshot)
+
+        return VStack(alignment: .leading, spacing: 16) {
+            Button {
+                page = .overview
+            } label: {
+                Label("返回", systemImage: "chevron.left")
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("额度重置卡")
+                    .font(.title2.weight(.semibold))
+                Text(status.summaryText)
+                    .foregroundStyle(.secondary)
+            }
+
+            if status.availableCredits.isEmpty {
+                ContentUnavailableView(
+                    status.isKnown ? "暂无可用重置卡" : "重置卡信息暂不可用",
+                    systemImage: "arrow.counterclockwise.circle",
+                    description: Text(status.expirationText)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(status.availableCredits) { credit in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Label("完整重置", systemImage: "arrow.counterclockwise.circle.fill")
+                                        .font(.headline)
+                                    Spacer()
+                                    Text("可用")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.green)
+                                }
+                                Text("\(status.fullExpirationText(for: credit)) 到期")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                Text(credit.description)
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(
+                                Color.primary.opacity(0.04),
+                                in: RoundedRectangle(cornerRadius: 10)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
     private func quotaRow(title: String, quota: MenuBarQuotaStatus) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -500,6 +564,30 @@ struct SessionNestStatusPopover: View {
             ProgressView(value: quota.fraction)
                 .tint(quota.color.swiftUIColor)
         }
+    }
+
+    private func resetCreditsRow(_ status: MenuBarResetCreditsStatus) -> some View {
+        Button {
+            page = .resetCredits
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.counterclockwise.circle")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(status.summaryText)
+                    Text(status.expirationText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(status.summaryText)，\(status.expirationText)")
     }
 
     private func metricCard(title: String, value: String, detail: String) -> some View {
@@ -524,64 +612,7 @@ struct SessionNestStatusPopover: View {
     }
 
     private func tokenTrend(_ statistics: MenuBarStatisticsStatus) -> some View {
-        Chart(statistics.dailyPoints) { point in
-            LineMark(
-                x: .value(
-                    "日期",
-                    Date(timeIntervalSince1970: TimeInterval(point.dayStart))
-                ),
-                y: .value("Token", point.usage.totalTokens),
-                series: .value("类型", "总 Token")
-            )
-            .foregroundStyle(Color.accentColor)
-            .interpolationMethod(.monotone)
-
-            LineMark(
-                x: .value(
-                    "日期",
-                    Date(timeIntervalSince1970: TimeInterval(point.dayStart))
-                ),
-                y: .value("Token", point.usage.cachedInputTokens),
-                series: .value("类型", "缓存输入")
-            )
-            .foregroundStyle(Color.orange)
-            .interpolationMethod(.monotone)
-
-            if statistics.showsSingleDayTrendMarker {
-                PointMark(
-                    x: .value(
-                        "日期",
-                        Date(timeIntervalSince1970: TimeInterval(point.dayStart))
-                    ),
-                    y: .value("Token", point.usage.totalTokens)
-                )
-                .foregroundStyle(Color.accentColor)
-                .symbolSize(36)
-
-                PointMark(
-                    x: .value(
-                        "日期",
-                        Date(timeIntervalSince1970: TimeInterval(point.dayStart))
-                    ),
-                    y: .value("Token", point.usage.cachedInputTokens)
-                )
-                .foregroundStyle(Color.orange)
-                .symbolSize(36)
-            }
-        }
-        .chartXAxis(.hidden)
-        .chartYAxis {
-            AxisMarks(position: .trailing) { value in
-                AxisGridLine()
-                AxisValueLabel {
-                    if let amount = value.as(Int64.self) {
-                        Text(statistics.tokenAxisLabel(amount))
-                    }
-                }
-            }
-        }
-        .frame(height: 130)
-        .accessibilityLabel("每日 Token 趋势")
+        TokenTrendChart(points: statistics.dailyPoints, presentation: .popover)
     }
 
 }

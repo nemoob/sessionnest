@@ -18,8 +18,9 @@ struct StatisticsProjectRow: Identifiable, Equatable, Sendable {
 struct StatisticsSessionRow: Identifiable, Equatable, Sendable {
     let threadID: String
     let title: String
-    let projectPath: String
+    let projectPath: String?
     let projectName: String
+    let workingDirectory: String
     let usage: TokenUsageBreakdown
 
     var id: String { threadID }
@@ -51,6 +52,54 @@ enum SessionStatistics {
             dailyUsage: dailyUsage,
             threadProjects: threadProjects,
             cutoff: cutoff(for: timeFilter, calendar: calendar, now: now),
+            calendar: calendar,
+            now: now
+        )
+    }
+
+    static func build(
+        threads: [CodexThread],
+        coveredThreadIDs: Set<String>,
+        timedUsage: [ThreadTokenTimedUsage],
+        threadProjects: [String: ThreadProjectCache],
+        startingAt cutoff: Int64,
+        calendar: Calendar,
+        now: Int64
+    ) -> StatisticsSnapshot {
+        let eligibleThreads = threads.filter {
+            $0.activityTimestamp >= cutoff && $0.activityTimestamp <= now
+        }
+        var usageByThreadAndDay: [String: [Int64: TokenUsageBreakdown]] = [:]
+        for row in timedUsage where row.eventAt >= cutoff && row.eventAt <= now {
+            let dayStart = Int64(
+                calendar.startOfDay(
+                    for: Date(timeIntervalSince1970: TimeInterval(row.eventAt))
+                ).timeIntervalSince1970
+            )
+            usageByThreadAndDay[row.threadID, default: [:]][dayStart] =
+                (usageByThreadAndDay[row.threadID]?[dayStart] ?? .zero) + row.usage
+        }
+        let dailyUsage = usageByThreadAndDay.flatMap { threadID, usageByDay in
+            usageByDay.map { dayStart, usage in
+                ThreadTokenDailyUsage(
+                    threadID: threadID,
+                    dayStart: dayStart,
+                    usage: usage
+                )
+            }
+        }
+        let startDay = Int64(
+            calendar.startOfDay(
+                for: Date(timeIntervalSince1970: TimeInterval(cutoff))
+            ).timeIntervalSince1970
+        )
+
+        return build(
+            threads: eligibleThreads,
+            coveredThreadIDs: coveredThreadIDs,
+            dailyUsage: dailyUsage,
+            threadProjects: threadProjects,
+            cutoff: startDay,
             calendar: calendar,
             now: now
         )
@@ -115,22 +164,26 @@ enum SessionStatistics {
             coveredThreadIDs.contains($0.key)
         }
         let sessionRows = measuredThreadByID.map { threadID, thread in
-            let projectPath = ThreadProjectClassification.effectivePath(
+            let resolution = ThreadProjectClassification.effectiveResolution(
                 for: thread,
                 cached: threadProjects[threadID]
             )
+            let projectPath = resolution.projectPath
             return StatisticsSessionRow(
                 threadID: threadID,
                 title: thread.displayTitle,
                 projectPath: projectPath,
-                projectName: URL(fileURLWithPath: projectPath).lastPathComponent,
+                projectName: projectPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+                    ?? "无项目",
+                workingDirectory: thread.cwd,
                 usage: usageByThread[threadID] ?? .zero
             )
         }.sorted(by: sessionSort)
 
         var usageByProject: [String: TokenUsageBreakdown] = [:]
         for row in sessionRows where !row.usage.isZero {
-            usageByProject[row.projectPath] = (usageByProject[row.projectPath] ?? .zero) + row.usage
+            guard let projectPath = row.projectPath else { continue }
+            usageByProject[projectPath] = (usageByProject[projectPath] ?? .zero) + row.usage
         }
         let projectRows = usageByProject.map { path, usage in
             StatisticsProjectRow(

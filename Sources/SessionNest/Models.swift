@@ -67,10 +67,28 @@ struct ThreadProjectEvidence: Equatable, Sendable {
     var agentMessages: Set<String>
 }
 
+enum ThreadProjectResolution: Equatable, Sendable {
+    case project(path: String)
+    case workingDirectory(path: String)
+    case noProject
+
+    var projectPath: String? {
+        switch self {
+        case .project(let path), .workingDirectory(let path): path
+        case .noProject: nil
+        }
+    }
+
+    var isNoProject: Bool { self == .noProject }
+}
+
 struct ThreadProjectCache: Equatable, Sendable {
     let threadID: String
-    let projectPath: String?
+    let resolution: ThreadProjectResolution
     let analyzedUpdatedAt: Int64
+    let classifierVersion: Int64
+
+    var projectPath: String? { resolution.projectPath }
 }
 
 struct SessionCollection: Identifiable, Equatable, Sendable {

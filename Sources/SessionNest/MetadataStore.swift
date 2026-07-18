@@ -24,6 +24,12 @@ struct ThreadTokenDailyUsage: Equatable, Sendable {
     let usage: TokenUsageBreakdown
 }
 
+struct ThreadTokenTimedUsage: Equatable, Sendable {
+    let threadID: String
+    let eventAt: Int64
+    let usage: TokenUsageBreakdown
+}
+
 actor MetadataStore {
     nonisolated(unsafe) private let database: OpaquePointer
 
@@ -152,7 +158,11 @@ actor MetadataStore {
 
     func loadThreadProjects() throws -> [String: ThreadProjectCache] {
         let statement = try prepare(
-            "SELECT thread_id, project_path, analyzed_updated_at FROM thread_projects"
+            """
+            SELECT thread_id, project_path, analyzed_updated_at,
+                   resolution_kind, classifier_version
+            FROM thread_projects
+            """
         )
         defer { sqlite3_finalize(statement) }
 
@@ -161,10 +171,18 @@ actor MetadataStore {
             switch sqlite3_step(statement) {
             case SQLITE_ROW:
                 let threadID = text(at: 0, in: statement)
+                let projectPath = optionalText(at: 1, in: statement)
+                guard
+                    let resolution = Self.projectResolution(
+                        kind: text(at: 3, in: statement),
+                        path: projectPath
+                    )
+                else { continue }
                 projects[threadID] = ThreadProjectCache(
                     threadID: threadID,
-                    projectPath: optionalText(at: 1, in: statement),
-                    analyzedUpdatedAt: sqlite3_column_int64(statement, 2)
+                    resolution: resolution,
+                    analyzedUpdatedAt: sqlite3_column_int64(statement, 2),
+                    classifierVersion: sqlite3_column_int64(statement, 4)
                 )
             case SQLITE_DONE:
                 return projects
@@ -251,26 +269,81 @@ actor MetadataStore {
         }
     }
 
-    func saveThreadProject(_ project: ThreadProjectCache) throws {
+    func loadThreadTokenTimedUsage(
+        startingAt start: Int64,
+        endingAt end: Int64
+    ) throws -> [ThreadTokenTimedUsage] {
         let statement = try prepare(
             """
-            INSERT INTO thread_projects (thread_id, project_path, analyzed_updated_at)
-            VALUES (?, ?, ?)
+            SELECT thread_id, event_at, input_tokens, cached_input_tokens,
+                   output_tokens, reasoning_output_tokens, total_tokens
+            FROM thread_token_timed
+            WHERE event_at >= ? AND event_at <= ?
+            ORDER BY thread_id, event_at
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(start, to: 1, in: statement)
+        try bind(end, to: 2, in: statement)
+
+        var timedUsage: [ThreadTokenTimedUsage] = []
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                timedUsage.append(
+                    ThreadTokenTimedUsage(
+                        threadID: text(at: 0, in: statement),
+                        eventAt: sqlite3_column_int64(statement, 1),
+                        usage: TokenUsageBreakdown(
+                            inputTokens: sqlite3_column_int64(statement, 2),
+                            cachedInputTokens: sqlite3_column_int64(statement, 3),
+                            outputTokens: sqlite3_column_int64(statement, 4),
+                            reasoningOutputTokens: sqlite3_column_int64(statement, 5),
+                            totalTokens: sqlite3_column_int64(statement, 6)
+                        )
+                    ))
+            case SQLITE_DONE:
+                return timedUsage
+            default:
+                throw sqliteError()
+            }
+        }
+    }
+
+    func saveThreadProject(_ project: ThreadProjectCache) throws {
+        let stored = Self.storedProjectResolution(project.resolution)
+        let statement = try prepare(
+            """
+            INSERT INTO thread_projects (
+              thread_id, project_path, analyzed_updated_at,
+              resolution_kind, classifier_version
+            )
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(thread_id) DO UPDATE SET
               project_path = excluded.project_path,
               analyzed_updated_at = excluded.analyzed_updated_at
-            WHERE excluded.analyzed_updated_at >= thread_projects.analyzed_updated_at
+              ,resolution_kind = excluded.resolution_kind
+              ,classifier_version = excluded.classifier_version
+            WHERE excluded.classifier_version > thread_projects.classifier_version
+               OR (
+                 excluded.classifier_version = thread_projects.classifier_version
+                 AND excluded.analyzed_updated_at >= thread_projects.analyzed_updated_at
+               )
             """
         )
         defer { sqlite3_finalize(statement) }
 
         try bind(project.threadID, to: 1, in: statement)
-        if let projectPath = project.projectPath {
+        if let projectPath = stored.path {
             try bind(projectPath, to: 2, in: statement)
         } else if sqlite3_bind_null(statement, 2) != SQLITE_OK {
             throw sqliteError()
         }
         guard sqlite3_bind_int64(statement, 3, project.analyzedUpdatedAt) == SQLITE_OK else {
+            throw sqliteError()
+        }
+        try bind(stored.kind, to: 4, in: statement)
+        guard sqlite3_bind_int64(statement, 5, project.classifierVersion) == SQLITE_OK else {
             throw sqliteError()
         }
         try finish(statement)
@@ -290,17 +363,19 @@ actor MetadataStore {
         try execute("BEGIN")
         do {
             if rebuild {
-                let deleteStatement = try prepare(
-                    "DELETE FROM thread_token_daily WHERE thread_id = ?"
-                )
-                do {
-                    try bind(threadID, to: 1, in: deleteStatement)
-                    try finish(deleteStatement)
-                } catch {
+                for table in ["thread_token_daily", "thread_token_timed"] {
+                    let deleteStatement = try prepare(
+                        "DELETE FROM \(table) WHERE thread_id = ?"
+                    )
+                    do {
+                        try bind(threadID, to: 1, in: deleteStatement)
+                        try finish(deleteStatement)
+                    } catch {
+                        sqlite3_finalize(deleteStatement)
+                        throw error
+                    }
                     sqlite3_finalize(deleteStatement)
-                    throw error
                 }
-                sqlite3_finalize(deleteStatement)
 
                 if !result.observedCheckpoint {
                     let deleteCacheStatement = try prepare(
@@ -387,6 +462,38 @@ actor MetadataStore {
                 throw error
             }
             sqlite3_finalize(dailyStatement)
+
+            let timedStatement = try prepare(
+                """
+                INSERT INTO thread_token_timed (
+                  thread_id, event_at, input_tokens, cached_input_tokens,
+                  output_tokens, reasoning_output_tokens, total_tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id, event_at) DO UPDATE SET
+                  input_tokens = thread_token_timed.input_tokens + excluded.input_tokens,
+                  cached_input_tokens = thread_token_timed.cached_input_tokens + excluded.cached_input_tokens,
+                  output_tokens = thread_token_timed.output_tokens + excluded.output_tokens,
+                  reasoning_output_tokens = thread_token_timed.reasoning_output_tokens + excluded.reasoning_output_tokens,
+                  total_tokens = thread_token_timed.total_tokens + excluded.total_tokens
+                """
+            )
+            do {
+                for (eventAt, usage) in result.timedUsage where !usage.isZero {
+                    guard sqlite3_reset(timedStatement) == SQLITE_OK,
+                        sqlite3_clear_bindings(timedStatement) == SQLITE_OK
+                    else {
+                        throw sqliteError()
+                    }
+                    try bind(threadID, to: 1, in: timedStatement)
+                    try bind(eventAt, to: 2, in: timedStatement)
+                    try bind(usage, startingAt: 3, in: timedStatement)
+                    try finish(timedStatement)
+                }
+            } catch {
+                sqlite3_finalize(timedStatement)
+                throw error
+            }
+            sqlite3_finalize(timedStatement)
             try execute("COMMIT")
         } catch {
             let transactionError = error
@@ -529,7 +636,9 @@ actor MetadataStore {
             CREATE TABLE IF NOT EXISTS thread_projects (
               thread_id TEXT PRIMARY KEY,
               project_path TEXT,
-              analyzed_updated_at INTEGER NOT NULL
+              analyzed_updated_at INTEGER NOT NULL,
+              resolution_kind TEXT NOT NULL DEFAULT 'legacy',
+              classifier_version INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS thread_token_usage (
               thread_id TEXT PRIMARY KEY,
@@ -555,9 +664,89 @@ actor MetadataStore {
               total_tokens INTEGER NOT NULL,
               PRIMARY KEY (thread_id, day_start)
             );
+            CREATE TABLE IF NOT EXISTS thread_token_timed (
+              thread_id TEXT NOT NULL,
+              event_at INTEGER NOT NULL,
+              input_tokens INTEGER NOT NULL,
+              cached_input_tokens INTEGER NOT NULL,
+              output_tokens INTEGER NOT NULL,
+              reasoning_output_tokens INTEGER NOT NULL,
+              total_tokens INTEGER NOT NULL,
+              PRIMARY KEY (thread_id, event_at)
+            );
+            CREATE INDEX IF NOT EXISTS thread_token_timed_event_at
+              ON thread_token_timed(event_at);
             """
         guard sqlite3_exec(database, schema, nil, nil, nil) == SQLITE_OK else {
             throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+        }
+        try addColumnIfNeeded(
+            "resolution_kind",
+            definition: "TEXT NOT NULL DEFAULT 'legacy'",
+            to: "thread_projects",
+            in: database
+        )
+        try addColumnIfNeeded(
+            "classifier_version",
+            definition: "INTEGER NOT NULL DEFAULT 0",
+            to: "thread_projects",
+            in: database
+        )
+    }
+
+    private static func addColumnIfNeeded(
+        _ column: String,
+        definition: String,
+        to table: String,
+        in database: OpaquePointer
+    ) throws {
+        guard !tableColumns(table, in: database).contains(column) else { return }
+        let sql = "ALTER TABLE \(table) ADD COLUMN \(column) \(definition)"
+        guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+            throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+        }
+    }
+
+    private static func tableColumns(_ table: String, in database: OpaquePointer) -> Set<String> {
+        var statement: OpaquePointer?
+        guard
+            sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil)
+                == SQLITE_OK,
+            let statement
+        else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        var columns: Set<String> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let name = sqlite3_column_text(statement, 1) else { continue }
+            columns.insert(String(cString: name))
+        }
+        return columns
+    }
+
+    private static func projectResolution(
+        kind: String,
+        path: String?
+    ) -> ThreadProjectResolution? {
+        switch (kind, path) {
+        case ("project", .some(let path)) where !path.isEmpty:
+            .project(path: path)
+        case ("working_directory", .some(let path)) where !path.isEmpty:
+            .workingDirectory(path: path)
+        case ("no_project", .none):
+            .noProject
+        default:
+            nil
+        }
+    }
+
+    private static func storedProjectResolution(
+        _ resolution: ThreadProjectResolution
+    ) -> (kind: String, path: String?) {
+        switch resolution {
+        case .project(let path): ("project", path)
+        case .workingDirectory(let path): ("working_directory", path)
+        case .noProject: ("no_project", nil)
         }
     }
 

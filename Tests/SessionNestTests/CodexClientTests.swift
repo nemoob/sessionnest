@@ -230,6 +230,49 @@ import Testing
     #expect(fake.log.contains(#"thread\/unarchive"#))
 }
 
+@Test func readsRateLimitsAndResetCreditsAsOneUsageSnapshot() async throws {
+    let fake = try FakeCodex(
+        scriptBody: """
+            while IFS= read -r line; do
+                id="$(printf '%s\\n' "$line" | sed -n 's/.*"id":\\([0-9][0-9]*\\).*/\\1/p')"
+                case "$line" in
+                    *'"method":"initialize"'*)
+                        printf '{"id":%s,"result":{}}\\n' "$id"
+                        ;;
+                    *'account'*'rateLimits'*'read'*)
+                        printf '{"id":%s,"result":{"rateLimits":{"primary":{"usedPercent":8,"windowDurationMins":10080,"resetsAt":1784949892},"planType":"pro"},"rateLimitResetCredits":{"availableCount":3,"credits":[{"id":"credit-2","resetType":"codexRateLimits","status":"available","grantedAt":1782935481,"expiresAt":1785527481,"title":"Full reset","description":"Second"},{"id":"credit-1","resetType":"codexRateLimits","status":"available","grantedAt":1782517319,"expiresAt":1785109319,"title":"Full reset","description":"First"}]}}}\\n' "$id"
+                        ;;
+                esac
+            done
+            """
+    )
+    defer { fake.remove() }
+    let client = try CodexClient(executableURL: fake.executableURL)
+    defer { Task { await client.stop() } }
+
+    try await client.start()
+    let usage = try await client.readUsageSnapshot()
+    await client.stop()
+
+    #expect(usage.rateLimits.weeklyWindow?.usedPercent == 8)
+    #expect(usage.resetCredits?.availableCount == 3)
+    #expect(usage.resetCredits?.credits.map(\.id) == ["credit-2", "credit-1"])
+    #expect(usage.resetCredits?.credits[0].expiresAt == 1_785_527_481)
+    #expect(usage.resetCredits?.credits[0].description == "Second")
+}
+
+@Test func usageSnapshotKeepsMissingResetCreditsUnknown() throws {
+    let usage = try JSONDecoder().decode(
+        CodexUsageSnapshot.self,
+        from: Data(
+            #"{"rateLimits":{"primary":{"usedPercent":8,"windowDurationMins":10080}}}"#
+                .utf8
+        )
+    )
+
+    #expect(usage.resetCredits == nil)
+}
+
 @Test func readsChatGPTAccountIdentity() async throws {
     let fake = try FakeCodex(
         scriptBody: """

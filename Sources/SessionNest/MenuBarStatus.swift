@@ -89,6 +89,73 @@ struct MenuBarQuotaStatus {
     }
 }
 
+struct MenuBarResetCreditsStatus {
+    let summaryText: String
+    let expirationText: String
+    let availableCredits: [CodexRateLimitResetCredit]
+    let isKnown: Bool
+    private let calendar: Calendar
+
+    init(
+        summary: CodexRateLimitResetCreditsSummary?,
+        now: Int64 = Int64(Date().timeIntervalSince1970),
+        calendar: Calendar = .current
+    ) {
+        self.calendar = calendar
+        guard let summary else {
+            summaryText = "重置卡信息暂不可用"
+            expirationText = "Codex 当前未提供重置卡信息"
+            availableCredits = []
+            isKnown = false
+            return
+        }
+
+        isKnown = true
+        availableCredits = summary.credits
+            .filter { $0.status == "available" && $0.expiresAt > now }
+            .sorted {
+                if $0.expiresAt != $1.expiresAt { return $0.expiresAt < $1.expiresAt }
+                if $0.grantedAt != $1.grantedAt { return $0.grantedAt < $1.grantedAt }
+                return $0.id < $1.id
+            }
+        let availableCount = max(0, summary.availableCount)
+        guard availableCount > 0 else {
+            summaryText = "暂无可用重置卡"
+            expirationText = "当前账户没有可用次数"
+            return
+        }
+
+        summaryText = "重置卡 可用 \(availableCount) 次"
+        expirationText =
+            availableCredits.first.map {
+                "最近于 \(Self.shortDate($0.expiresAt, calendar: calendar)) 到期"
+            } ?? "到期时间暂不可用"
+    }
+
+    func fullExpirationText(for credit: CodexRateLimitResetCredit) -> String {
+        Self.fullDate(credit.expiresAt, calendar: calendar)
+    }
+
+    private static func shortDate(_ timestamp: Int64, calendar: Calendar) -> String {
+        let components = dateComponents(timestamp, calendar: calendar)
+        return "\(components.month ?? 0)月\(components.day ?? 0)日 "
+            + String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0)
+    }
+
+    private static func fullDate(_ timestamp: Int64, calendar: Calendar) -> String {
+        let components = dateComponents(timestamp, calendar: calendar)
+        return "\(components.year ?? 0)年\(components.month ?? 0)月\(components.day ?? 0)日 "
+            + String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0)
+    }
+
+    private static func dateComponents(_ timestamp: Int64, calendar: Calendar) -> DateComponents {
+        calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: Date(timeIntervalSince1970: TimeInterval(timestamp))
+        )
+    }
+}
+
 struct MenuBarStatisticsStatus {
     let sessionValueText: String
     let sessionDetailText: String

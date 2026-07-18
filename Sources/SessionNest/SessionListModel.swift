@@ -11,12 +11,14 @@ typealias TokenScanOperation =
     ) async throws -> TokenScanResult
 typealias ThreadReloadOperation = @Sendable () async throws -> ([CodexThread], [CodexThread])
 typealias RateLimitRefreshOperation = @Sendable () async throws -> CodexRateLimitSnapshot
+typealias UsageRefreshOperation = @Sendable () async throws -> CodexUsageSnapshot
 
 enum SidebarSelection: Hashable {
     case recent
     case statistics
     case favorites
     case unclassified
+    case noProject
     case archived
     case project(String)
     case collection(String)
@@ -39,10 +41,13 @@ struct ManagedThread: Identifiable, Equatable {
     let thread: CodexThread
     let metadata: ThreadMetadata
     let tags: [SessionTag]
-    let projectPath: String
+    let projectResolution: ThreadProjectResolution
 
     var id: String { thread.id }
-    var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
+    var projectPath: String? { projectResolution.projectPath }
+    var projectName: String {
+        projectPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "无项目"
+    }
 }
 
 struct ProjectDirectoryNode: Identifiable, Equatable {
@@ -61,16 +66,27 @@ enum ProjectDirectoryTree {
         threads: [CodexThread],
         threadProjects: [String: ThreadProjectCache]
     ) -> [ProjectDirectoryNode] {
-        let directCounts = Dictionary(
-            grouping: threads,
-            by: {
-                ThreadProjectClassification.effectivePath(
-                    for: $0,
-                    cached: threadProjects[$0.id]
+        let resolvedThreads = threads.map { thread in
+            (
+                thread,
+                ThreadProjectClassification.effectiveResolution(
+                    for: thread,
+                    cached: threadProjects[thread.id]
                 )
+            )
+        }
+        var directCounts: [String: Int] = [:]
+        var includedPaths: Set<String> = []
+        for (thread, resolution) in resolvedThreads {
+            guard let projectPath = resolution.projectPath else { continue }
+            let normalizedProjectPath = normalizedPath(projectPath)
+            directCounts[normalizedProjectPath, default: 0] += 1
+            includedPaths.insert(normalizedProjectPath)
+            if CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd) == nil {
+                includedPaths.insert(normalizedPath(thread.cwd))
             }
-        ).mapValues(\.count)
-        let paths = Array(Set(directCounts.keys).union(threads.map { normalizedPath($0.cwd) }))
+        }
+        let paths = Array(includedPaths)
         let parentByPath = Dictionary(
             uniqueKeysWithValues: paths.map { path in
                 let parent =
@@ -118,14 +134,30 @@ enum ProjectDirectoryTree {
 }
 
 enum ThreadProjectClassification {
+    static let classifierVersion: Int64 = 1
+
+    static func effectiveResolution(
+        for thread: CodexThread,
+        cached: ThreadProjectCache?
+    ) -> ThreadProjectResolution {
+        if let cached,
+            cached.analyzedUpdatedAt >= thread.updatedAt,
+            cached.classifierVersion == classifierVersion
+        {
+            return normalized(cached.resolution)
+        }
+        if CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd) != nil {
+            return .noProject
+        }
+        return .workingDirectory(path: ProjectDirectoryTree.normalizedPath(thread.cwd))
+    }
+
     static func effectivePath(
         for thread: CodexThread,
         cached: ThreadProjectCache?
     ) -> String {
-        let cachedPath = cached.flatMap {
-            $0.analyzedUpdatedAt >= thread.updatedAt ? $0.projectPath : nil
-        }
-        return ProjectDirectoryTree.normalizedPath(cachedPath ?? thread.cwd)
+        effectiveResolution(for: thread, cached: cached).projectPath
+            ?? ProjectDirectoryTree.normalizedPath(thread.cwd)
     }
 
     static func needsAnalysis(
@@ -133,6 +165,20 @@ enum ThreadProjectClassification {
         cached: ThreadProjectCache?
     ) -> Bool {
         cached == nil || cached!.analyzedUpdatedAt < thread.updatedAt
+            || cached!.classifierVersion != classifierVersion
+    }
+
+    private static func normalized(
+        _ resolution: ThreadProjectResolution
+    ) -> ThreadProjectResolution {
+        switch resolution {
+        case .project(let path):
+            .project(path: ProjectDirectoryTree.normalizedPath(path))
+        case .workingDirectory(let path):
+            .workingDirectory(path: ProjectDirectoryTree.normalizedPath(path))
+        case .noProject:
+            .noProject
+        }
     }
 }
 
@@ -231,7 +277,7 @@ enum SessionFilter {
                 thread: thread,
                 metadata: threadMetadata,
                 tags: attachedTags,
-                projectPath: ThreadProjectClassification.effectivePath(
+                projectResolution: ThreadProjectClassification.effectiveResolution(
                     for: thread,
                     cached: threadProjects[thread.id]
                 )
@@ -289,8 +335,10 @@ enum SessionFilter {
             thread.metadata.isFavorite
         case .unclassified:
             thread.metadata.collectionID == nil
+        case .noProject:
+            thread.projectResolution.isNoProject
         case .project(let path):
-            ProjectDirectoryTree.contains(path: thread.projectPath, in: path)
+            thread.projectPath.map { ProjectDirectoryTree.contains(path: $0, in: path) } == true
         case .collection(let id):
             thread.metadata.collectionID == id
         case .tag(let id):
@@ -303,7 +351,8 @@ enum SessionFilter {
             [
                 thread.thread.displayTitle,
                 thread.thread.preview,
-                thread.projectPath,
+                thread.thread.cwd,
+                thread.projectPath ?? "",
                 thread.projectName,
                 thread.thread.gitInfo?.branch ?? "",
             ] + thread.tags.map(\.name)
@@ -335,7 +384,9 @@ final class SessionListModel: ObservableObject {
     @Published var threadTokenDailyUsage: [ThreadTokenDailyUsage] = []
     @Published private(set) var tokenCoveredThreadIDs: Set<String> = []
     @Published private(set) var rateLimitSnapshot: CodexRateLimitSnapshot?
+    @Published private(set) var resetCreditsSnapshot: CodexRateLimitResetCreditsSummary?
     @Published private(set) var accountSnapshot: CodexAccountSnapshot?
+    @Published private(set) var quotaCycleStatisticsSnapshot: StatisticsSnapshot?
     @Published private(set) var lastSuccessfulReloadAt: Date?
     @Published var selection: SidebarSelection = .statistics
     @Published var selectedThreadID: String?
@@ -349,7 +400,7 @@ final class SessionListModel: ObservableObject {
 
     let client: CodexClient
     let store: MetadataStore
-    private let rateLimitRefreshOperation: RateLimitRefreshOperation
+    private let usageRefreshOperation: UsageRefreshOperation
     private let tokenScanOperation: TokenScanOperation
     private let threadReloadOperation: ThreadReloadOperation?
     private var stateRevision = SessionStateRevision()
@@ -362,11 +413,15 @@ final class SessionListModel: ObservableObject {
     private var reloadTask: Task<Void, Never>?
     private var rateLimitRefreshTask: Task<Void, Never>?
 
-    private static let tokenParserVersion: Int64 = 1
+    private static let tokenParserVersion: Int64 = 2
     static let automaticRefreshInterval: TimeInterval = 15 * 60
 
     var totalSessionCount: Int {
         activeThreads.count + archivedThreads.count
+    }
+
+    var quotaCycleTokenUsage: Int64? {
+        quotaCycleStatisticsSnapshot?.totalUsage.totalTokens
     }
 
     var visibleThreads: [ManagedThread] {
@@ -403,46 +458,11 @@ final class SessionListModel: ObservableObject {
         )
     }
 
-    func currentQuotaCycleTokenUsage(
-        now: Int64 = Int64(Date().timeIntervalSince1970),
-        calendar: Calendar = .current
-    ) -> Int64? {
-        QuotaCycleTokenUsage.totalTokens(
-            dailyUsage: threadTokenDailyUsage,
-            coveredThreadIDs: tokenCoveredThreadIDs,
-            knownThreadIDs: Set((activeThreads + archivedThreads).map(\.id)),
-            window: rateLimitSnapshot?.weeklyWindow,
-            calendar: calendar,
-            now: now
-        )
-    }
-
-    func currentQuotaCycleStatisticsSnapshot(
-        calendar: Calendar = .current,
-        now: Int64 = Int64(Date().timeIntervalSince1970)
-    ) -> StatisticsSnapshot? {
-        guard
-            let startDay = QuotaCycleWindow.startDay(
-                window: rateLimitSnapshot?.weeklyWindow,
-                calendar: calendar
-            )
-        else { return nil }
-
-        return SessionStatistics.build(
-            threads: activeThreads + archivedThreads,
-            coveredThreadIDs: tokenCoveredThreadIDs,
-            dailyUsage: threadTokenDailyUsage,
-            threadProjects: threadProjects,
-            startingAt: startDay,
-            calendar: calendar,
-            now: now
-        )
-    }
-
     init(
         client: CodexClient,
         store: MetadataStore,
         rateLimitRefreshOperation: RateLimitRefreshOperation? = nil,
+        usageRefreshOperation: UsageRefreshOperation? = nil,
         tokenScanOperation: @escaping TokenScanOperation = { url, offset, baseline, calendar in
             try RolloutTokenScanner.scan(
                 url: url,
@@ -455,8 +475,18 @@ final class SessionListModel: ObservableObject {
     ) {
         self.client = client
         self.store = store
-        self.rateLimitRefreshOperation =
-            rateLimitRefreshOperation ?? { try await client.readRateLimits() }
+        if let usageRefreshOperation {
+            self.usageRefreshOperation = usageRefreshOperation
+        } else if let rateLimitRefreshOperation {
+            self.usageRefreshOperation = {
+                CodexUsageSnapshot(
+                    rateLimits: try await rateLimitRefreshOperation(),
+                    resetCredits: nil
+                )
+            }
+        } else {
+            self.usageRefreshOperation = { try await client.readUsageSnapshot() }
+        }
         self.tokenScanOperation = tokenScanOperation
         self.threadReloadOperation = threadReloadOperation
     }
@@ -504,8 +534,8 @@ final class SessionListModel: ObservableObject {
                 loadedThreadTokenCache,
                 loadedThreadTokenDailyUsage
             )
-            let rateLimitSnapshot =
-                threadReloadOperation == nil ? try? await client.readRateLimits() : nil
+            let usageSnapshot =
+                threadReloadOperation == nil ? try? await client.readUsageSnapshot() : nil
             let accountSnapshot =
                 threadReloadOperation == nil ? try? await client.readAccount() : nil
             guard stateRevision.accepts(revision) else { return }
@@ -523,11 +553,13 @@ final class SessionListModel: ObservableObject {
                 cache: result.6,
                 parserVersion: Self.tokenParserVersion
             )
-            self.rateLimitSnapshot = rateLimitSnapshot
+            rateLimitSnapshot = usageSnapshot?.rateLimits
+            resetCreditsSnapshot = usageSnapshot?.resetCredits
             self.accountSnapshot = accountSnapshot
             lastSuccessfulReloadAt = Date()
             errorMessage = nil
-            await startProjectClassification(for: result.0.0)
+            await refreshQuotaCycleStatistics()
+            await startProjectClassification(for: result.0.0 + result.0.1)
             await startTokenUsageScan(for: result.0.0 + result.0.1)
         } catch {
             record(error, revision: revision)
@@ -558,9 +590,11 @@ final class SessionListModel: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             do {
-                let snapshot = try await rateLimitRefreshOperation()
+                let snapshot = try await usageRefreshOperation()
                 guard !Task.isCancelled else { return }
-                rateLimitSnapshot = snapshot
+                rateLimitSnapshot = snapshot.rateLimits
+                resetCreditsSnapshot = snapshot.resetCredits
+                await refreshQuotaCycleStatistics()
             } catch {
                 return
             }
@@ -714,23 +748,45 @@ final class SessionListModel: ObservableObject {
                 else { return }
 
                 do {
-                    let candidates = try ThreadProjectScanner.directChildGitRepositories(
-                        in: thread.cwd
-                    )
-                    let projectPath: String?
-                    if candidates.isEmpty {
-                        projectPath = nil
-                    } else {
-                        let evidence = try await client.readThreadEvidence(threadID: thread.id)
-                        projectPath = ThreadProjectClassifier.classify(
-                            evidence: evidence,
-                            candidates: candidates
+                    let scratchRoot = CodexScratchWorkspaceDetector.sessionRoot(for: thread.cwd)
+                    let resolution: ThreadProjectResolution
+                    if let scratchRoot {
+                        var evidence = try await client.readThreadEvidence(threadID: thread.id)
+                        evidence.commandWorkingDirectories.insert(thread.cwd)
+                        let candidates = try ThreadProjectScanner.scratchGitRepositories(
+                            in: scratchRoot,
+                            evidence: evidence
                         )
+                        resolution =
+                            ThreadProjectClassifier.classify(
+                                evidence: evidence,
+                                candidates: candidates
+                            ).map(ThreadProjectResolution.project(path:)) ?? .noProject
+                    } else {
+                        let candidates = try ThreadProjectScanner.directChildGitRepositories(
+                            in: thread.cwd
+                        )
+                        if candidates.isEmpty {
+                            resolution = .workingDirectory(
+                                path: ProjectDirectoryTree.normalizedPath(thread.cwd)
+                            )
+                        } else {
+                            let evidence = try await client.readThreadEvidence(threadID: thread.id)
+                            resolution =
+                                ThreadProjectClassifier.classify(
+                                    evidence: evidence,
+                                    candidates: candidates
+                                ).map(ThreadProjectResolution.project(path:))
+                                ?? .workingDirectory(
+                                    path: ProjectDirectoryTree.normalizedPath(thread.cwd)
+                                )
+                        }
                     }
                     let cached = ThreadProjectCache(
                         threadID: thread.id,
-                        projectPath: projectPath,
-                        analyzedUpdatedAt: thread.updatedAt
+                        resolution: resolution,
+                        analyzedUpdatedAt: thread.updatedAt,
+                        classifierVersion: ThreadProjectClassification.classifierVersion
                     )
 
                     guard !Task.isCancelled,
@@ -931,7 +987,7 @@ final class SessionListModel: ObservableObject {
         dailyUsage: [ThreadTokenDailyUsage],
         generation: Int,
         replacementRequest: Int
-    ) {
+    ) async {
         guard acceptsTokenScan(generation, replacementRequest: replacementRequest) else { return }
         threadTokenCache = cache
         threadTokenDailyUsage = dailyUsage
@@ -940,8 +996,41 @@ final class SessionListModel: ObservableObject {
             cache: cache,
             parserVersion: Self.tokenParserVersion
         )
+        await refreshQuotaCycleStatistics()
         isScanningTokenUsage = false
         tokenScanTask = nil
+    }
+
+    private func refreshQuotaCycleStatistics(
+        now: Int64 = Int64(Date().timeIntervalSince1970),
+        calendar: Calendar = .current
+    ) async {
+        guard
+            let start = QuotaCycleWindow.startTimestamp(
+                window: rateLimitSnapshot?.weeklyWindow
+            )
+        else {
+            quotaCycleStatisticsSnapshot = nil
+            return
+        }
+
+        do {
+            let timedUsage = try await store.loadThreadTokenTimedUsage(
+                startingAt: start,
+                endingAt: now
+            )
+            quotaCycleStatisticsSnapshot = SessionStatistics.build(
+                threads: activeThreads + archivedThreads,
+                coveredThreadIDs: tokenCoveredThreadIDs,
+                timedUsage: timedUsage,
+                threadProjects: threadProjects,
+                startingAt: start,
+                calendar: calendar,
+                now: now
+            )
+        } catch {
+            quotaCycleStatisticsSnapshot = nil
+        }
     }
 
     private func finishTokenScan(_ generation: Int, replacementRequest: Int) {

@@ -88,6 +88,48 @@ import Testing
 }
 
 @MainActor
+@Test func lightweightUsageRefreshPublishesResetCreditsAtomically() async throws {
+    let fixture = try SessionModelFixture(
+        threadID: "lightweight-usage",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let rateLimits = try weeklyRateLimitSnapshot(usedPercent: 8)
+    let credits = CodexRateLimitResetCreditsSummary(
+        availableCount: 1,
+        credits: [
+            CodexRateLimitResetCredit(
+                id: "credit-1",
+                resetType: "codexRateLimits",
+                status: "available",
+                grantedAt: 100,
+                expiresAt: 200,
+                title: "Full reset",
+                description: "Granted"
+            )
+        ]
+    )
+    let usage = CodexUsageSnapshot(rateLimits: rateLimits, resetCredits: credits)
+    let probe = UsageRefreshProbe(snapshot: usage)
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        usageRefreshOperation: { try await probe.load() }
+    )
+
+    await model.refreshRateLimits()
+
+    #expect(model.rateLimitSnapshot == rateLimits)
+    #expect(model.resetCreditsSnapshot == credits)
+
+    await probe.failSubsequentLoads()
+    await model.refreshRateLimits()
+
+    #expect(model.rateLimitSnapshot == rateLimits)
+    #expect(model.resetCreditsSnapshot == credits)
+}
+
+@MainActor
 @Test func concurrentRateLimitRefreshCallsShareOneRequest() async throws {
     let fixture = try SessionModelFixture(
         threadID: "coalesced-rate-limit",
@@ -148,7 +190,7 @@ import Testing
 }
 
 @MainActor
-@Test func quotaCycleStatisticsSnapshotUsesResetDayWithoutChangingMainFilter() async throws {
+@Test func quotaCycleStatisticsSnapshotPublishesExactRangeWithoutChangingMainFilter() async throws {
     let fixture = try SessionModelFixture(
         threadID: "quota-cycle-statistics",
         createRollout: false
@@ -174,17 +216,14 @@ import Testing
     ]
     await model.refreshRateLimits()
 
-    let cycleSnapshot = model.currentQuotaCycleStatisticsSnapshot(calendar: .current, now: now)
-
-    #expect(cycleSnapshot?.totalSessionCount == 1)
+    #expect(model.quotaCycleStatisticsSnapshot?.totalSessionCount == 1)
+    #expect(model.quotaCycleTokenUsage == 0)
     #expect(model.timeFilter == .thirtyDays)
     #expect(model.statisticsSnapshot.totalSessionCount == 2)
 
     let missingWindowModel = SessionListModel(client: fixture.client, store: fixture.store)
-    #expect(
-        missingWindowModel.currentQuotaCycleStatisticsSnapshot(calendar: .current, now: now)
-            == nil
-    )
+    #expect(missingWindowModel.quotaCycleStatisticsSnapshot == nil)
+    #expect(missingWindowModel.quotaCycleTokenUsage == nil)
 }
 
 @Test func filtersByProjectFavoriteAndText() {
@@ -325,8 +364,9 @@ import Testing
     let projects = [
         "root": ThreadProjectCache(
             threadID: "root",
-            projectPath: "/work/codex/sessionnest",
-            analyzedUpdatedAt: 4
+            resolution: .project(path: "/work/codex/sessionnest"),
+            analyzedUpdatedAt: 4,
+            classifierVersion: 1
         )
     ]
 
@@ -357,25 +397,63 @@ import Testing
     #expect(
         ThreadProjectClassification.needsAnalysis(
             thread: thread,
-            cached: ThreadProjectCache(threadID: thread.id, projectPath: nil, analyzedUpdatedAt: 3)
+            cached: ThreadProjectCache(
+                threadID: thread.id,
+                resolution: .workingDirectory(path: "/work/codex"),
+                analyzedUpdatedAt: 3,
+                classifierVersion: 1
+            )
         ))
     #expect(
         ThreadProjectClassification.needsAnalysis(
             thread: thread,
             cached: ThreadProjectCache(
                 threadID: thread.id,
-                projectPath: nil,
-                analyzedUpdatedAt: thread.updatedAt
+                resolution: .workingDirectory(path: "/work/codex"),
+                analyzedUpdatedAt: thread.updatedAt,
+                classifierVersion: 1
             )
         ) == false)
+    #expect(
+        ThreadProjectClassification.needsAnalysis(
+            thread: thread,
+            cached: ThreadProjectCache(
+                threadID: thread.id,
+                resolution: .project(path: "/work/codex"),
+                analyzedUpdatedAt: thread.updatedAt,
+                classifierVersion: 0
+            )
+        ))
+}
+
+@Test func scratchWorkspaceWithoutCurrentCacheIsProvisionallyNoProject() {
+    let thread = directoryThread(
+        "scratch",
+        cwd: "/Users/me/Documents/Codex/2026-07-18/session",
+        updatedAt: 4
+    )
+
+    #expect(
+        ThreadProjectClassification.effectiveResolution(for: thread, cached: nil) == .noProject
+    )
+}
+
+@Test func normalWorkspaceWithoutCurrentCacheUsesWorkingDirectory() {
+    let thread = directoryThread("normal", cwd: "/work/app/../app", updatedAt: 4)
+
+    #expect(
+        ThreadProjectClassification.effectiveResolution(for: thread, cached: nil)
+            == .workingDirectory(path: "/work/app")
+    )
 }
 
 @Test func unknownProjectFallsBackToRawWorkingDirectory() {
     let thread = directoryThread("root", cwd: "/work/codex/../codex", updatedAt: 4)
     let cached = ThreadProjectCache(
         threadID: thread.id,
-        projectPath: nil,
-        analyzedUpdatedAt: thread.updatedAt
+        resolution: .workingDirectory(path: "/work/codex"),
+        analyzedUpdatedAt: thread.updatedAt,
+        classifierVersion: 1
     )
 
     #expect(ThreadProjectClassification.effectivePath(for: thread, cached: cached) == "/work/codex")
@@ -386,8 +464,9 @@ import Testing
     let projects = [
         thread.id: ThreadProjectCache(
             threadID: thread.id,
-            projectPath: "/work/codex/sessionnest",
-            analyzedUpdatedAt: 3
+            resolution: .project(path: "/work/codex/sessionnest"),
+            analyzedUpdatedAt: 3,
+            classifierVersion: 1
         )
     ]
 
@@ -426,6 +505,90 @@ import Testing
     #expect(tree[0].children.isEmpty)
     #expect(project.isEmpty)
     #expect(searched.isEmpty)
+}
+
+@Test func projectTreeOmitsNoProjectScratchPathsAndKeepsResolvedRepository() {
+    let scratchWithoutProject = directoryThread(
+        "scratch-none",
+        cwd: "/Users/me/Documents/Codex/2026-07-18/none",
+        updatedAt: 4
+    )
+    let scratchWithProject = directoryThread(
+        "scratch-project",
+        cwd: "/Users/me/Documents/Codex/2026-07-18/with-project",
+        updatedAt: 4
+    )
+    let repository = "/Users/me/Documents/Codex/2026-07-18/with-project/repository"
+    let projects = [
+        scratchWithoutProject.id: ThreadProjectCache(
+            threadID: scratchWithoutProject.id,
+            resolution: .noProject,
+            analyzedUpdatedAt: 4,
+            classifierVersion: 1
+        ),
+        scratchWithProject.id: ThreadProjectCache(
+            threadID: scratchWithProject.id,
+            resolution: .project(path: repository),
+            analyzedUpdatedAt: 4,
+            classifierVersion: 1
+        ),
+    ]
+
+    let tree = ProjectDirectoryTree.build(
+        threads: [scratchWithoutProject, scratchWithProject],
+        threadProjects: projects
+    )
+
+    #expect(tree.map(\.path) == [repository])
+    #expect(tree[0].directCount == 1)
+    #expect(tree[0].children.isEmpty)
+}
+
+@Test func noProjectSelectionAndRawWorkingDirectorySearchRemainAvailable() {
+    let scratch = directoryThread(
+        "scratch",
+        cwd: "/Users/me/Documents/Codex/2026-07-18/session",
+        updatedAt: 4
+    )
+    let normal = directoryThread("normal", cwd: "/work/normal", updatedAt: 3)
+    let projects = [
+        scratch.id: ThreadProjectCache(
+            threadID: scratch.id,
+            resolution: .noProject,
+            analyzedUpdatedAt: 4,
+            classifierVersion: 1
+        )
+    ]
+
+    let noProject = SessionFilter.apply(
+        threads: [scratch, normal],
+        metadata: [:],
+        tags: [],
+        threadTags: [:],
+        threadProjects: projects,
+        selection: .noProject,
+        query: "",
+        timeFilter: .all,
+        sortOrder: .recent,
+        now: 100
+    )
+    let searched = SessionFilter.apply(
+        threads: [scratch, normal],
+        metadata: [:],
+        tags: [],
+        threadTags: [:],
+        threadProjects: projects,
+        selection: .recent,
+        query: "2026-07-18/session",
+        timeFilter: .all,
+        sortOrder: .recent,
+        now: 100
+    )
+
+    #expect(noProject.map(\.id) == [scratch.id])
+    #expect(noProject[0].projectPath == nil)
+    #expect(noProject[0].projectName == "无项目")
+    #expect(searched.map(\.id) == [scratch.id])
 }
 
 @Test func classificationTaskReplacementWaitsForCanceledTaskToFinish() async {
@@ -486,7 +649,7 @@ import Testing
         rolloutPath: fixture.thread.path!,
         fileSize: 0,
         fileModificationTimeNS: 0,
-        parserVersion: 1,
+        parserVersion: 2,
         result: cachedResult,
         rebuild: true
     )
@@ -683,6 +846,24 @@ private actor RateLimitRefreshProbe {
     }
 
     func load() throws -> CodexRateLimitSnapshot {
+        if shouldFail { throw RateLimitRefreshTestError.expectedFailure }
+        return snapshot
+    }
+
+    func failSubsequentLoads() {
+        shouldFail = true
+    }
+}
+
+private actor UsageRefreshProbe {
+    let snapshot: CodexUsageSnapshot
+    private var shouldFail = false
+
+    init(snapshot: CodexUsageSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func load() throws -> CodexUsageSnapshot {
         if shouldFail { throw RateLimitRefreshTestError.expectedFailure }
         return snapshot
     }
