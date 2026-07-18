@@ -94,7 +94,9 @@ import Testing
     #expect(projects["legacy"] == nil)
 
     var migratedDatabase: OpaquePointer?
-    #expect(sqlite3_open_v2(databaseURL.path, &migratedDatabase, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+    #expect(
+        sqlite3_open_v2(databaseURL.path, &migratedDatabase, SQLITE_OPEN_READONLY, nil) == SQLITE_OK
+    )
     guard let migratedDatabase else { return }
     defer { sqlite3_close(migratedDatabase) }
     #expect(tableColumns("thread_projects", in: migratedDatabase).contains("resolution_kind"))
@@ -503,8 +505,9 @@ private func executeSQLite(_ sql: String, at databaseURL: URL) throws {
 
 private func tableColumns(_ table: String, in database: OpaquePointer) -> Set<String> {
     var statement: OpaquePointer?
-    guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil)
-        == SQLITE_OK,
+    guard
+        sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil)
+            == SQLITE_OK,
         let statement
     else { return [] }
     defer { sqlite3_finalize(statement) }

@@ -616,8 +616,9 @@ actor MetadataStore {
 
     private static func tableColumns(_ table: String, in database: OpaquePointer) -> Set<String> {
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil)
-            == SQLITE_OK,
+        guard
+            sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil)
+                == SQLITE_OK,
             let statement
         else { return [] }
         defer { sqlite3_finalize(statement) }

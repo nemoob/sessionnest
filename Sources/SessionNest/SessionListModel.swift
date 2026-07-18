@@ -771,10 +771,11 @@ final class SessionListModel: ObservableObject {
                             in: scratchRoot,
                             evidence: evidence
                         )
-                        resolution = ThreadProjectClassifier.classify(
-                            evidence: evidence,
-                            candidates: candidates
-                        ).map(ThreadProjectResolution.project(path:)) ?? .noProject
+                        resolution =
+                            ThreadProjectClassifier.classify(
+                                evidence: evidence,
+                                candidates: candidates
+                            ).map(ThreadProjectResolution.project(path:)) ?? .noProject
                     } else {
                         let candidates = try ThreadProjectScanner.directChildGitRepositories(
                             in: thread.cwd
@@ -785,10 +786,11 @@ final class SessionListModel: ObservableObject {
                             )
                         } else {
                             let evidence = try await client.readThreadEvidence(threadID: thread.id)
-                            resolution = ThreadProjectClassifier.classify(
-                                evidence: evidence,
-                                candidates: candidates
-                            ).map(ThreadProjectResolution.project(path:))
+                            resolution =
+                                ThreadProjectClassifier.classify(
+                                    evidence: evidence,
+                                    candidates: candidates
+                                ).map(ThreadProjectResolution.project(path:))
                                 ?? .workingDirectory(
                                     path: ProjectDirectoryTree.normalizedPath(thread.cwd)
                                 )
