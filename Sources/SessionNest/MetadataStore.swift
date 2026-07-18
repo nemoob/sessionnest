@@ -152,7 +152,11 @@ actor MetadataStore {
 
     func loadThreadProjects() throws -> [String: ThreadProjectCache] {
         let statement = try prepare(
-            "SELECT thread_id, project_path, analyzed_updated_at FROM thread_projects"
+            """
+            SELECT thread_id, project_path, analyzed_updated_at,
+                   resolution_kind, classifier_version
+            FROM thread_projects
+            """
         )
         defer { sqlite3_finalize(statement) }
 
@@ -161,10 +165,18 @@ actor MetadataStore {
             switch sqlite3_step(statement) {
             case SQLITE_ROW:
                 let threadID = text(at: 0, in: statement)
+                let projectPath = optionalText(at: 1, in: statement)
+                guard
+                    let resolution = Self.projectResolution(
+                        kind: text(at: 3, in: statement),
+                        path: projectPath
+                    )
+                else { continue }
                 projects[threadID] = ThreadProjectCache(
                     threadID: threadID,
-                    projectPath: optionalText(at: 1, in: statement),
-                    analyzedUpdatedAt: sqlite3_column_int64(statement, 2)
+                    resolution: resolution,
+                    analyzedUpdatedAt: sqlite3_column_int64(statement, 2),
+                    classifierVersion: sqlite3_column_int64(statement, 4)
                 )
             case SQLITE_DONE:
                 return projects
@@ -252,25 +264,39 @@ actor MetadataStore {
     }
 
     func saveThreadProject(_ project: ThreadProjectCache) throws {
+        let stored = Self.storedProjectResolution(project.resolution)
         let statement = try prepare(
             """
-            INSERT INTO thread_projects (thread_id, project_path, analyzed_updated_at)
-            VALUES (?, ?, ?)
+            INSERT INTO thread_projects (
+              thread_id, project_path, analyzed_updated_at,
+              resolution_kind, classifier_version
+            )
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(thread_id) DO UPDATE SET
               project_path = excluded.project_path,
               analyzed_updated_at = excluded.analyzed_updated_at
-            WHERE excluded.analyzed_updated_at >= thread_projects.analyzed_updated_at
+              ,resolution_kind = excluded.resolution_kind
+              ,classifier_version = excluded.classifier_version
+            WHERE excluded.classifier_version > thread_projects.classifier_version
+               OR (
+                 excluded.classifier_version = thread_projects.classifier_version
+                 AND excluded.analyzed_updated_at >= thread_projects.analyzed_updated_at
+               )
             """
         )
         defer { sqlite3_finalize(statement) }
 
         try bind(project.threadID, to: 1, in: statement)
-        if let projectPath = project.projectPath {
+        if let projectPath = stored.path {
             try bind(projectPath, to: 2, in: statement)
         } else if sqlite3_bind_null(statement, 2) != SQLITE_OK {
             throw sqliteError()
         }
         guard sqlite3_bind_int64(statement, 3, project.analyzedUpdatedAt) == SQLITE_OK else {
+            throw sqliteError()
+        }
+        try bind(stored.kind, to: 4, in: statement)
+        guard sqlite3_bind_int64(statement, 5, project.classifierVersion) == SQLITE_OK else {
             throw sqliteError()
         }
         try finish(statement)
@@ -529,7 +555,9 @@ actor MetadataStore {
             CREATE TABLE IF NOT EXISTS thread_projects (
               thread_id TEXT PRIMARY KEY,
               project_path TEXT,
-              analyzed_updated_at INTEGER NOT NULL
+              analyzed_updated_at INTEGER NOT NULL,
+              resolution_kind TEXT NOT NULL DEFAULT 'legacy',
+              classifier_version INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS thread_token_usage (
               thread_id TEXT PRIMARY KEY,
@@ -558,6 +586,73 @@ actor MetadataStore {
             """
         guard sqlite3_exec(database, schema, nil, nil, nil) == SQLITE_OK else {
             throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+        }
+        try addColumnIfNeeded(
+            "resolution_kind",
+            definition: "TEXT NOT NULL DEFAULT 'legacy'",
+            to: "thread_projects",
+            in: database
+        )
+        try addColumnIfNeeded(
+            "classifier_version",
+            definition: "INTEGER NOT NULL DEFAULT 0",
+            to: "thread_projects",
+            in: database
+        )
+    }
+
+    private static func addColumnIfNeeded(
+        _ column: String,
+        definition: String,
+        to table: String,
+        in database: OpaquePointer
+    ) throws {
+        guard !tableColumns(table, in: database).contains(column) else { return }
+        let sql = "ALTER TABLE \(table) ADD COLUMN \(column) \(definition)"
+        guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+            throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+        }
+    }
+
+    private static func tableColumns(_ table: String, in database: OpaquePointer) -> Set<String> {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil)
+            == SQLITE_OK,
+            let statement
+        else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        var columns: Set<String> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let name = sqlite3_column_text(statement, 1) else { continue }
+            columns.insert(String(cString: name))
+        }
+        return columns
+    }
+
+    private static func projectResolution(
+        kind: String,
+        path: String?
+    ) -> ThreadProjectResolution? {
+        switch (kind, path) {
+        case ("project", .some(let path)) where !path.isEmpty:
+            .project(path: path)
+        case ("working_directory", .some(let path)) where !path.isEmpty:
+            .workingDirectory(path: path)
+        case ("no_project", .none):
+            .noProject
+        default:
+            nil
+        }
+    }
+
+    private static func storedProjectResolution(
+        _ resolution: ThreadProjectResolution
+    ) -> (kind: String, path: String?) {
+        switch resolution {
+        case .project(let path): ("project", path)
+        case .workingDirectory(let path): ("working_directory", path)
+        case .noProject: ("no_project", nil)
         }
     }
 

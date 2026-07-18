@@ -325,8 +325,9 @@ import Testing
     let projects = [
         "root": ThreadProjectCache(
             threadID: "root",
-            projectPath: "/work/codex/sessionnest",
-            analyzedUpdatedAt: 4
+            resolution: .project(path: "/work/codex/sessionnest"),
+            analyzedUpdatedAt: 4,
+            classifierVersion: 1
         )
     ]
 
@@ -357,15 +358,21 @@ import Testing
     #expect(
         ThreadProjectClassification.needsAnalysis(
             thread: thread,
-            cached: ThreadProjectCache(threadID: thread.id, projectPath: nil, analyzedUpdatedAt: 3)
+            cached: ThreadProjectCache(
+                threadID: thread.id,
+                resolution: .workingDirectory(path: "/work/codex"),
+                analyzedUpdatedAt: 3,
+                classifierVersion: 1
+            )
         ))
     #expect(
         ThreadProjectClassification.needsAnalysis(
             thread: thread,
             cached: ThreadProjectCache(
                 threadID: thread.id,
-                projectPath: nil,
-                analyzedUpdatedAt: thread.updatedAt
+                resolution: .workingDirectory(path: "/work/codex"),
+                analyzedUpdatedAt: thread.updatedAt,
+                classifierVersion: 1
             )
         ) == false)
 }
@@ -374,8 +381,9 @@ import Testing
     let thread = directoryThread("root", cwd: "/work/codex/../codex", updatedAt: 4)
     let cached = ThreadProjectCache(
         threadID: thread.id,
-        projectPath: nil,
-        analyzedUpdatedAt: thread.updatedAt
+        resolution: .workingDirectory(path: "/work/codex"),
+        analyzedUpdatedAt: thread.updatedAt,
+        classifierVersion: 1
     )
 
     #expect(ThreadProjectClassification.effectivePath(for: thread, cached: cached) == "/work/codex")
@@ -386,8 +394,9 @@ import Testing
     let projects = [
         thread.id: ThreadProjectCache(
             threadID: thread.id,
-            projectPath: "/work/codex/sessionnest",
-            analyzedUpdatedAt: 3
+            resolution: .project(path: "/work/codex/sessionnest"),
+            analyzedUpdatedAt: 3,
+            classifierVersion: 1
         )
     ]
 

@@ -220,13 +220,15 @@ struct SessionStatisticsTests {
         let projects = [
             alpha.id: ThreadProjectCache(
                 threadID: alpha.id,
-                projectPath: "/work/projects/Zeta",
-                analyzedUpdatedAt: now
+                resolution: .project(path: "/work/projects/Zeta"),
+                analyzedUpdatedAt: now,
+                classifierVersion: 1
             ),
             beta.id: ThreadProjectCache(
                 threadID: beta.id,
-                projectPath: "/work/projects/Alpha",
-                analyzedUpdatedAt: now
+                resolution: .project(path: "/work/projects/Alpha"),
+                analyzedUpdatedAt: now,
+                classifierVersion: 1
             ),
         ]
 

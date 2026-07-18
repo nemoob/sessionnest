@@ -363,6 +363,7 @@ final class SessionListModel: ObservableObject {
     private var rateLimitRefreshTask: Task<Void, Never>?
 
     private static let tokenParserVersion: Int64 = 1
+    nonisolated static let projectClassifierVersion: Int64 = 1
     static let automaticRefreshInterval: TimeInterval = 15 * 60
 
     var totalSessionCount: Int {
@@ -729,8 +730,12 @@ final class SessionListModel: ObservableObject {
                     }
                     let cached = ThreadProjectCache(
                         threadID: thread.id,
-                        projectPath: projectPath,
-                        analyzedUpdatedAt: thread.updatedAt
+                        resolution: projectPath.map(ThreadProjectResolution.project(path:))
+                            ?? .workingDirectory(
+                                path: ProjectDirectoryTree.normalizedPath(thread.cwd)
+                            ),
+                        analyzedUpdatedAt: thread.updatedAt,
+                        classifierVersion: Self.projectClassifierVersion
                     )
 
                     guard !Task.isCancelled,

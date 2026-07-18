@@ -28,28 +28,109 @@ import Testing
     #expect(tags == [tag])
 }
 
-@Test func projectCachePersistsKnownAndUnknownResults() async throws {
+@Test func projectCachePersistsEveryResolutionKind() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
 
-    try await store.saveThreadProject(
-        ThreadProjectCache(
-            threadID: "known", projectPath: "/work/codex/sample-app", analyzedUpdatedAt: 10
-        ))
-    try await store.saveThreadProject(
-        ThreadProjectCache(
-            threadID: "unknown", projectPath: nil, analyzedUpdatedAt: 20
-        ))
+    let project = ThreadProjectCache(
+        threadID: "project",
+        resolution: .project(path: "/work/codex/sample-app"),
+        analyzedUpdatedAt: 10,
+        classifierVersion: 1
+    )
+    let workingDirectory = ThreadProjectCache(
+        threadID: "working-directory",
+        resolution: .workingDirectory(path: "/work/codex"),
+        analyzedUpdatedAt: 20,
+        classifierVersion: 1
+    )
+    let noProject = ThreadProjectCache(
+        threadID: "no-project",
+        resolution: .noProject,
+        analyzedUpdatedAt: 30,
+        classifierVersion: 1
+    )
+
+    try await store.saveThreadProject(project)
+    try await store.saveThreadProject(workingDirectory)
+    try await store.saveThreadProject(noProject)
 
     let projects = try await store.loadThreadProjects()
-    #expect(projects["known"]?.projectPath == "/work/codex/sample-app")
+    #expect(projects[project.threadID] == project)
+    #expect(projects[workingDirectory.threadID] == workingDirectory)
+    #expect(projects[noProject.threadID] == noProject)
+}
+
+@Test func legacyProjectCacheMigratesAndRequiresReanalysis() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    var database: OpaquePointer?
+    #expect(sqlite3_open(databaseURL.path, &database) == SQLITE_OK)
+    guard let database else { return }
     #expect(
-        projects["unknown"]
-            == ThreadProjectCache(
-                threadID: "unknown", projectPath: nil, analyzedUpdatedAt: 20
-            ))
+        sqlite3_exec(
+            database,
+            """
+            CREATE TABLE thread_projects (
+              thread_id TEXT PRIMARY KEY,
+              project_path TEXT,
+              analyzed_updated_at INTEGER NOT NULL
+            );
+            INSERT INTO thread_projects VALUES ('legacy', '/work/legacy', 10);
+            """,
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK
+    )
+    sqlite3_close(database)
+
+    let store = try MetadataStore(databaseURL: databaseURL)
+    let projects = try await store.loadThreadProjects()
+    #expect(projects["legacy"] == nil)
+
+    var migratedDatabase: OpaquePointer?
+    #expect(sqlite3_open_v2(databaseURL.path, &migratedDatabase, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+    guard let migratedDatabase else { return }
+    defer { sqlite3_close(migratedDatabase) }
+    #expect(tableColumns("thread_projects", in: migratedDatabase).contains("resolution_kind"))
+    #expect(tableColumns("thread_projects", in: migratedDatabase).contains("classifier_version"))
+}
+
+@Test func invalidProjectCacheRowsRequireReanalysis() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    let store = try MetadataStore(databaseURL: databaseURL)
+
+    var database: OpaquePointer?
+    #expect(sqlite3_open(databaseURL.path, &database) == SQLITE_OK)
+    guard let database else { return }
+    #expect(
+        sqlite3_exec(
+            database,
+            """
+            INSERT INTO thread_projects
+              (thread_id, project_path, analyzed_updated_at, resolution_kind, classifier_version)
+            VALUES
+              ('missing-path', NULL, 10, 'project', 1),
+              ('unexpected-path', '/work/value', 10, 'no_project', 1),
+              ('unknown-kind', '/work/value', 10, 'unknown', 1);
+            """,
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK
+    )
+    sqlite3_close(database)
+
+    let projects = try await store.loadThreadProjects()
+    #expect(projects.isEmpty)
 }
 
 @Test func projectCacheDoesNotOverwriteNewerAnalysisWithStaleResult() async throws {
@@ -58,20 +139,22 @@ import Testing
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
 
+    let newer = ThreadProjectCache(
+        threadID: "known",
+        resolution: .project(path: "/work/codex/newer"),
+        analyzedUpdatedAt: 20,
+        classifierVersion: 1
+    )
+    try await store.saveThreadProject(newer)
     try await store.saveThreadProject(
         ThreadProjectCache(
-            threadID: "known", projectPath: "/work/codex/newer", analyzedUpdatedAt: 20
-        ))
-    try await store.saveThreadProject(
-        ThreadProjectCache(
-            threadID: "known", projectPath: "/work/codex/stale", analyzedUpdatedAt: 10
+            threadID: "known",
+            resolution: .project(path: "/work/codex/stale"),
+            analyzedUpdatedAt: 10,
+            classifierVersion: 1
         ))
 
-    #expect(
-        try await store.loadThreadProjects()["known"]
-            == ThreadProjectCache(
-                threadID: "known", projectPath: "/work/codex/newer", analyzedUpdatedAt: 20
-            ))
+    #expect(try await store.loadThreadProjects()["known"] == newer)
 }
 
 @Test func tokenUsageCachePersistsAppendAndRebuild() async throws {
@@ -416,4 +499,20 @@ private func executeSQLite(_ sql: String, at databaseURL: URL) throws {
     guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
         throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
     }
+}
+
+private func tableColumns(_ table: String, in database: OpaquePointer) -> Set<String> {
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil)
+        == SQLITE_OK,
+        let statement
+    else { return [] }
+    defer { sqlite3_finalize(statement) }
+
+    var columns: Set<String> = []
+    while sqlite3_step(statement) == SQLITE_ROW {
+        guard let name = sqlite3_column_text(statement, 1) else { continue }
+        columns.insert(String(cString: name))
+    }
+    return columns
 }

@@ -84,8 +84,11 @@ enum ThreadProjectResolution: Equatable, Sendable {
 
 struct ThreadProjectCache: Equatable, Sendable {
     let threadID: String
-    let projectPath: String?
+    let resolution: ThreadProjectResolution
     let analyzedUpdatedAt: Int64
+    let classifierVersion: Int64
+
+    var projectPath: String? { resolution.projectPath }
 }
 
 struct SessionCollection: Identifiable, Equatable, Sendable {
