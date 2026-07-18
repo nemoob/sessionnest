@@ -18,8 +18,9 @@ struct StatisticsProjectRow: Identifiable, Equatable, Sendable {
 struct StatisticsSessionRow: Identifiable, Equatable, Sendable {
     let threadID: String
     let title: String
-    let projectPath: String
+    let projectPath: String?
     let projectName: String
+    let workingDirectory: String
     let usage: TokenUsageBreakdown
 
     var id: String { threadID }
@@ -115,22 +116,26 @@ enum SessionStatistics {
             coveredThreadIDs.contains($0.key)
         }
         let sessionRows = measuredThreadByID.map { threadID, thread in
-            let projectPath = ThreadProjectClassification.effectivePath(
+            let resolution = ThreadProjectClassification.effectiveResolution(
                 for: thread,
                 cached: threadProjects[threadID]
             )
+            let projectPath = resolution.projectPath
             return StatisticsSessionRow(
                 threadID: threadID,
                 title: thread.displayTitle,
                 projectPath: projectPath,
-                projectName: URL(fileURLWithPath: projectPath).lastPathComponent,
+                projectName: projectPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+                    ?? "无项目",
+                workingDirectory: thread.cwd,
                 usage: usageByThread[threadID] ?? .zero
             )
         }.sorted(by: sessionSort)
 
         var usageByProject: [String: TokenUsageBreakdown] = [:]
         for row in sessionRows where !row.usage.isZero {
-            usageByProject[row.projectPath] = (usageByProject[row.projectPath] ?? .zero) + row.usage
+            guard let projectPath = row.projectPath else { continue }
+            usageByProject[projectPath] = (usageByProject[projectPath] ?? .zero) + row.usage
         }
         let projectRows = usageByProject.map { path, usage in
             StatisticsProjectRow(

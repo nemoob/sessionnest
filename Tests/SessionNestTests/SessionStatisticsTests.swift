@@ -268,6 +268,56 @@ struct SessionStatisticsTests {
         #expect(snapshot.sessionRows.map(\.usage.totalTokens) == [120, 120])
     }
 
+    @Test func noProjectUsageStaysInTotalsButIsExcludedFromProjectRanking() {
+        let projectThread = thread(
+            "project",
+            title: "Project",
+            cwd: "/work/project",
+            activityTimestamp: 100
+        )
+        let noProjectThread = thread(
+            "no-project",
+            title: "No Project",
+            cwd: "/Users/me/Documents/Codex/2026-07-18/session",
+            activityTimestamp: 100
+        )
+        let projects = [
+            projectThread.id: ThreadProjectCache(
+                threadID: projectThread.id,
+                resolution: .project(path: "/work/project"),
+                analyzedUpdatedAt: 100,
+                classifierVersion: 1
+            ),
+            noProjectThread.id: ThreadProjectCache(
+                threadID: noProjectThread.id,
+                resolution: .noProject,
+                analyzedUpdatedAt: 100,
+                classifierVersion: 1
+            ),
+        ]
+
+        let snapshot = SessionStatistics.build(
+            threads: [projectThread, noProjectThread],
+            coveredThreadIDs: [projectThread.id, noProjectThread.id],
+            dailyUsage: [
+                daily(projectThread.id, day: 100, usage: usage(80, 50, 20, 10, 100)),
+                daily(noProjectThread.id, day: 100, usage: usage(40, 20, 10, 5, 50)),
+            ],
+            threadProjects: projects,
+            timeFilter: .all,
+            calendar: calendar(timeZone: "UTC"),
+            now: 1_000
+        )
+
+        #expect(snapshot.totalUsage == usage(120, 70, 30, 15, 150))
+        #expect(snapshot.sessionRows.count == 2)
+        #expect(snapshot.projectRows.map(\.projectPath) == ["/work/project"])
+        let noProjectRow = snapshot.sessionRows.first { $0.threadID == noProjectThread.id }
+        #expect(noProjectRow?.projectPath == nil)
+        #expect(noProjectRow?.projectName == "无项目")
+        #expect(noProjectRow?.usage.totalTokens == 50)
+    }
+
     @Test func emptyInputBuildsEmptySnapshot() {
         let snapshot = SessionStatistics.build(
             threads: [],
