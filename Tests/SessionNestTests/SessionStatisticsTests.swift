@@ -34,6 +34,49 @@ struct SessionStatisticsTests {
         #expect(snapshot.sessionRows.map(\.threadID) == [included.id])
     }
 
+    @Test func exactRangeGroupsOnlyPostBoundaryTimedUsageIntoLocalDay() {
+        let calendar = calendar(timeZone: "Asia/Shanghai")
+        let dayStart = timestamp(2026, 7, 18, calendar: calendar)
+        let boundary = timestamp(2026, 7, 18, hour: 11, calendar: calendar) + 24 * 60 + 52
+        let now = boundary + 60
+        let covered = thread("covered", activityTimestamp: now)
+
+        let snapshot = SessionStatistics.build(
+            threads: [covered],
+            coveredThreadIDs: [covered.id],
+            timedUsage: [
+                ThreadTokenTimedUsage(
+                    threadID: covered.id,
+                    eventAt: boundary - 1,
+                    usage: usage(90, 80, 10, 5, 100)
+                ),
+                ThreadTokenTimedUsage(
+                    threadID: covered.id,
+                    eventAt: boundary,
+                    usage: usage(10, 5, 2, 1, 12)
+                ),
+                ThreadTokenTimedUsage(
+                    threadID: covered.id,
+                    eventAt: now,
+                    usage: usage(20, 10, 4, 2, 24)
+                ),
+                ThreadTokenTimedUsage(
+                    threadID: covered.id,
+                    eventAt: now + 1,
+                    usage: usage(70, 60, 8, 4, 80)
+                ),
+            ],
+            threadProjects: [:],
+            startingAt: boundary,
+            calendar: calendar,
+            now: now
+        )
+
+        #expect(snapshot.totalUsage == usage(30, 15, 6, 3, 36))
+        #expect(snapshot.dailyPoints.map(\.dayStart) == [dayStart])
+        #expect(snapshot.sessionRows.map(\.usage) == [usage(30, 15, 6, 3, 36)])
+    }
+
     @Test func sevenDayRangeUsesInclusiveLocalBoundaryAcrossSpringDST() {
         let calendar = calendar(timeZone: "America/Los_Angeles")
         let now = timestamp(2026, 3, 10, hour: 12, calendar: calendar)

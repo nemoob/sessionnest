@@ -60,6 +60,54 @@ enum SessionStatistics {
     static func build(
         threads: [CodexThread],
         coveredThreadIDs: Set<String>,
+        timedUsage: [ThreadTokenTimedUsage],
+        threadProjects: [String: ThreadProjectCache],
+        startingAt cutoff: Int64,
+        calendar: Calendar,
+        now: Int64
+    ) -> StatisticsSnapshot {
+        let eligibleThreads = threads.filter {
+            $0.activityTimestamp >= cutoff && $0.activityTimestamp <= now
+        }
+        var usageByThreadAndDay: [String: [Int64: TokenUsageBreakdown]] = [:]
+        for row in timedUsage where row.eventAt >= cutoff && row.eventAt <= now {
+            let dayStart = Int64(
+                calendar.startOfDay(
+                    for: Date(timeIntervalSince1970: TimeInterval(row.eventAt))
+                ).timeIntervalSince1970
+            )
+            usageByThreadAndDay[row.threadID, default: [:]][dayStart] =
+                (usageByThreadAndDay[row.threadID]?[dayStart] ?? .zero) + row.usage
+        }
+        let dailyUsage = usageByThreadAndDay.flatMap { threadID, usageByDay in
+            usageByDay.map { dayStart, usage in
+                ThreadTokenDailyUsage(
+                    threadID: threadID,
+                    dayStart: dayStart,
+                    usage: usage
+                )
+            }
+        }
+        let startDay = Int64(
+            calendar.startOfDay(
+                for: Date(timeIntervalSince1970: TimeInterval(cutoff))
+            ).timeIntervalSince1970
+        )
+
+        return build(
+            threads: eligibleThreads,
+            coveredThreadIDs: coveredThreadIDs,
+            dailyUsage: dailyUsage,
+            threadProjects: threadProjects,
+            cutoff: startDay,
+            calendar: calendar,
+            now: now
+        )
+    }
+
+    static func build(
+        threads: [CodexThread],
+        coveredThreadIDs: Set<String>,
         dailyUsage: [ThreadTokenDailyUsage],
         threadProjects: [String: ThreadProjectCache],
         startingAt cutoff: Int64,

@@ -279,13 +279,13 @@ struct SessionNestStatusPopover: View {
 
     private var overview: some View {
         let statisticsScope = StatusPopoverStatisticsScope.resolve(
-            cycleSnapshot: model.currentQuotaCycleStatisticsSnapshot(),
+            cycleSnapshot: model.quotaCycleStatisticsSnapshot,
             fallbackSnapshot: model.statisticsSnapshot(for: .sevenDays)
         )
         let snapshot = statisticsScope.snapshot
         let status = MenuBarStatus(
             snapshot: snapshot,
-            quotaCycleTokens: model.currentQuotaCycleTokenUsage(),
+            quotaCycleTokens: model.quotaCycleTokenUsage,
             rateLimits: model.rateLimitSnapshot,
             account: model.accountSnapshot,
             isLoading: model.isLoading,

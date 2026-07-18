@@ -256,7 +256,7 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
         return MenuBarStatus(
             totalSessions: model.totalSessionCount,
             measuredSessions: statistics.measuredSessionCount,
-            quotaCycleTokens: model.currentQuotaCycleTokenUsage(),
+            quotaCycleTokens: model.quotaCycleTokenUsage,
             rateLimits: model.rateLimitSnapshot,
             account: model.accountSnapshot,
             isLoading: model.isLoading,

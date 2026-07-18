@@ -384,6 +384,7 @@ final class SessionListModel: ObservableObject {
     @Published private(set) var tokenCoveredThreadIDs: Set<String> = []
     @Published private(set) var rateLimitSnapshot: CodexRateLimitSnapshot?
     @Published private(set) var accountSnapshot: CodexAccountSnapshot?
+    @Published private(set) var quotaCycleStatisticsSnapshot: StatisticsSnapshot?
     @Published private(set) var lastSuccessfulReloadAt: Date?
     @Published var selection: SidebarSelection = .statistics
     @Published var selectedThreadID: String?
@@ -417,6 +418,10 @@ final class SessionListModel: ObservableObject {
         activeThreads.count + archivedThreads.count
     }
 
+    var quotaCycleTokenUsage: Int64? {
+        quotaCycleStatisticsSnapshot?.totalUsage.totalTokens
+    }
+
     var visibleThreads: [ManagedThread] {
         SessionFilter.apply(
             threads: selection == .archived ? archivedThreads : activeThreads,
@@ -448,42 +453,6 @@ final class SessionListModel: ObservableObject {
             timeFilter: timeFilter,
             calendar: .current,
             now: Int64(Date().timeIntervalSince1970)
-        )
-    }
-
-    func currentQuotaCycleTokenUsage(
-        now: Int64 = Int64(Date().timeIntervalSince1970),
-        calendar: Calendar = .current
-    ) -> Int64? {
-        QuotaCycleTokenUsage.totalTokens(
-            dailyUsage: threadTokenDailyUsage,
-            coveredThreadIDs: tokenCoveredThreadIDs,
-            knownThreadIDs: Set((activeThreads + archivedThreads).map(\.id)),
-            window: rateLimitSnapshot?.weeklyWindow,
-            calendar: calendar,
-            now: now
-        )
-    }
-
-    func currentQuotaCycleStatisticsSnapshot(
-        calendar: Calendar = .current,
-        now: Int64 = Int64(Date().timeIntervalSince1970)
-    ) -> StatisticsSnapshot? {
-        guard
-            let startDay = QuotaCycleWindow.startDay(
-                window: rateLimitSnapshot?.weeklyWindow,
-                calendar: calendar
-            )
-        else { return nil }
-
-        return SessionStatistics.build(
-            threads: activeThreads + archivedThreads,
-            coveredThreadIDs: tokenCoveredThreadIDs,
-            dailyUsage: threadTokenDailyUsage,
-            threadProjects: threadProjects,
-            startingAt: startDay,
-            calendar: calendar,
-            now: now
         )
     }
 
@@ -575,6 +544,7 @@ final class SessionListModel: ObservableObject {
             self.accountSnapshot = accountSnapshot
             lastSuccessfulReloadAt = Date()
             errorMessage = nil
+            await refreshQuotaCycleStatistics()
             await startProjectClassification(for: result.0.0 + result.0.1)
             await startTokenUsageScan(for: result.0.0 + result.0.1)
         } catch {
@@ -609,6 +579,7 @@ final class SessionListModel: ObservableObject {
                 let snapshot = try await rateLimitRefreshOperation()
                 guard !Task.isCancelled else { return }
                 rateLimitSnapshot = snapshot
+                await refreshQuotaCycleStatistics()
             } catch {
                 return
             }
@@ -1001,7 +972,7 @@ final class SessionListModel: ObservableObject {
         dailyUsage: [ThreadTokenDailyUsage],
         generation: Int,
         replacementRequest: Int
-    ) {
+    ) async {
         guard acceptsTokenScan(generation, replacementRequest: replacementRequest) else { return }
         threadTokenCache = cache
         threadTokenDailyUsage = dailyUsage
@@ -1010,8 +981,41 @@ final class SessionListModel: ObservableObject {
             cache: cache,
             parserVersion: Self.tokenParserVersion
         )
+        await refreshQuotaCycleStatistics()
         isScanningTokenUsage = false
         tokenScanTask = nil
+    }
+
+    private func refreshQuotaCycleStatistics(
+        now: Int64 = Int64(Date().timeIntervalSince1970),
+        calendar: Calendar = .current
+    ) async {
+        guard
+            let start = QuotaCycleWindow.startTimestamp(
+                window: rateLimitSnapshot?.weeklyWindow
+            )
+        else {
+            quotaCycleStatisticsSnapshot = nil
+            return
+        }
+
+        do {
+            let timedUsage = try await store.loadThreadTokenTimedUsage(
+                startingAt: start,
+                endingAt: now
+            )
+            quotaCycleStatisticsSnapshot = SessionStatistics.build(
+                threads: activeThreads + archivedThreads,
+                coveredThreadIDs: tokenCoveredThreadIDs,
+                timedUsage: timedUsage,
+                threadProjects: threadProjects,
+                startingAt: start,
+                calendar: calendar,
+                now: now
+            )
+        } catch {
+            quotaCycleStatisticsSnapshot = nil
+        }
     }
 
     private func finishTokenScan(_ generation: Int, replacementRequest: Int) {

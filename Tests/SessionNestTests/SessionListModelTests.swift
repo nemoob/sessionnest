@@ -148,7 +148,7 @@ import Testing
 }
 
 @MainActor
-@Test func quotaCycleStatisticsSnapshotUsesResetDayWithoutChangingMainFilter() async throws {
+@Test func quotaCycleStatisticsSnapshotPublishesExactRangeWithoutChangingMainFilter() async throws {
     let fixture = try SessionModelFixture(
         threadID: "quota-cycle-statistics",
         createRollout: false
@@ -174,17 +174,14 @@ import Testing
     ]
     await model.refreshRateLimits()
 
-    let cycleSnapshot = model.currentQuotaCycleStatisticsSnapshot(calendar: .current, now: now)
-
-    #expect(cycleSnapshot?.totalSessionCount == 1)
+    #expect(model.quotaCycleStatisticsSnapshot?.totalSessionCount == 1)
+    #expect(model.quotaCycleTokenUsage == 0)
     #expect(model.timeFilter == .thirtyDays)
     #expect(model.statisticsSnapshot.totalSessionCount == 2)
 
     let missingWindowModel = SessionListModel(client: fixture.client, store: fixture.store)
-    #expect(
-        missingWindowModel.currentQuotaCycleStatisticsSnapshot(calendar: .current, now: now)
-            == nil
-    )
+    #expect(missingWindowModel.quotaCycleStatisticsSnapshot == nil)
+    #expect(missingWindowModel.quotaCycleTokenUsage == nil)
 }
 
 @Test func filtersByProjectFavoriteAndText() {
