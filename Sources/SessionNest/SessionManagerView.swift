@@ -53,6 +53,8 @@ struct SessionManagerView: View {
 
     private var sidebar: some View {
         List(selection: sidebarSelection) {
+            Label("额度", systemImage: "gauge.with.dots.needle.67percent")
+                .tag(SidebarSelection.quota)
             Label("统计概览", systemImage: "chart.bar.xaxis")
                 .tag(SidebarSelection.statistics)
             sidebarRow("最近会话", systemImage: "clock", count: model.activeThreads.count)
@@ -106,7 +108,9 @@ struct SessionManagerView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if model.selection == .statistics {
+        if model.selection == .quota {
+            QuotaDashboardView(model: model)
+        } else if model.selection == .statistics {
             StatisticsDashboardView(model: model)
         } else {
             sessionList
@@ -284,6 +288,7 @@ struct SessionManagerView: View {
 
     private var selectionTitle: String {
         switch model.selection {
+        case .quota: "额度"
         case .recent: "最近会话"
         case .statistics: "统计概览"
         case .favorites: "收藏"

@@ -14,6 +14,7 @@ typealias RateLimitRefreshOperation = @Sendable () async throws -> CodexRateLimi
 typealias UsageRefreshOperation = @Sendable () async throws -> CodexUsageSnapshot
 
 enum SidebarSelection: Hashable {
+    case quota
     case recent
     case statistics
     case favorites
@@ -340,7 +341,7 @@ enum SessionFilter {
         threadTags: [String: Set<String>]
     ) -> Bool {
         switch selection {
-        case .recent, .statistics, .archived:
+        case .quota, .recent, .statistics, .archived:
             true
         case .favorites:
             thread.metadata.isFavorite
@@ -400,6 +401,7 @@ final class SessionListModel: ObservableObject {
     @Published private(set) var accountSnapshot: CodexAccountSnapshot?
     @Published private(set) var quotaCycleStatisticsSnapshot: StatisticsSnapshot?
     @Published private(set) var lastSuccessfulReloadAt: Date?
+    @Published private(set) var lastSuccessfulUsageRefreshAt: Date?
     @Published var selection: SidebarSelection = .statistics
     @Published var selectedThreadID: String?
     @Published var query = ""
@@ -408,6 +410,8 @@ final class SessionListModel: ObservableObject {
     @Published var isLoading = true
     @Published var isClassifyingProjects = false
     @Published var isScanningTokenUsage = false
+    @Published private(set) var isRefreshingUsage = false
+    @Published private(set) var usageRefreshErrorMessage: String?
     @Published var errorMessage: String?
 
     let client: CodexClient
@@ -580,6 +584,10 @@ final class SessionListModel: ObservableObject {
             resetCreditsSnapshot = usageSnapshot?.resetCredits
             self.accountSnapshot = accountSnapshot
             lastSuccessfulReloadAt = Date()
+            if usageSnapshot != nil {
+                lastSuccessfulUsageRefreshAt = lastSuccessfulReloadAt
+                usageRefreshErrorMessage = nil
+            }
             errorMessage = nil
             await refreshQuotaCycleStatistics()
             await startProjectClassification(
@@ -607,12 +615,13 @@ final class SessionListModel: ObservableObject {
         await reload()
     }
 
-    func refreshRateLimits() async {
+    func refreshRateLimits(now: Date = Date()) async {
         if let rateLimitRefreshTask {
             await rateLimitRefreshTask.value
             return
         }
 
+        isRefreshingUsage = true
         let task = Task { [weak self] in
             guard let self else { return }
             do {
@@ -620,14 +629,32 @@ final class SessionListModel: ObservableObject {
                 guard !Task.isCancelled else { return }
                 rateLimitSnapshot = snapshot.rateLimits
                 resetCreditsSnapshot = snapshot.resetCredits
+                lastSuccessfulUsageRefreshAt = now
+                usageRefreshErrorMessage = nil
                 await refreshQuotaCycleStatistics()
             } catch {
-                return
+                usageRefreshErrorMessage = error.localizedDescription
             }
         }
         rateLimitRefreshTask = task
         await task.value
         rateLimitRefreshTask = nil
+        isRefreshingUsage = false
+    }
+
+    func refreshRateLimitsIfStale(
+        now: Date = Date(),
+        maximumAge: TimeInterval = SessionNestQuotaRefreshSchedule.interval
+    ) async {
+        guard
+            SessionRefreshPolicy.shouldRefresh(
+                lastSuccessfulReloadAt: lastSuccessfulUsageRefreshAt,
+                now: now,
+                maximumAge: maximumAge
+            )
+        else { return }
+
+        await refreshRateLimits(now: now)
     }
 
     private func loadThreadLists() async throws -> ([CodexThread], [CodexThread]) {

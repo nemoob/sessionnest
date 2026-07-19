@@ -23,8 +23,8 @@ SessionNest is an independent open-source project and is not affiliated with or 
   and colored tags
 - Archive, unarchive, and reopen sessions in Codex
 - View local Token usage by day, project, and session
-- See weekly remaining quota, exact current-cycle local Token usage, and reset-card expirations from
-  the menu bar
+- See account details, weekly remaining quota, exact current-cycle local Token usage, and reset-card
+  expirations from a dedicated main-window dashboard or the menu bar
 - Hover over or select a day in the Token trend chart to inspect its complete Token breakdown
 - Monitor session count and Token-statistics coverage from the menu bar
 - Follow the system appearance or choose a light or dark theme

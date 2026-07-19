@@ -58,13 +58,19 @@ struct MenuBarQuotaStatus {
     let remainingText: String
     let fraction: Double
     let resetText: String
+    let resetAtText: String
     let color: MenuBarQuotaColor
 
-    init(window: CodexRateLimitWindow?, now: Int64) {
+    init(
+        window: CodexRateLimitWindow?,
+        now: Int64,
+        calendar: Calendar = .current
+    ) {
         guard let window else {
             remainingText = "-- 剩余"
             fraction = 0
             resetText = "重置时间 --"
+            resetAtText = "重置时间 --"
             color = .gray
             return
         }
@@ -73,6 +79,7 @@ struct MenuBarQuotaStatus {
         remainingText = "\(remaining)% 剩余"
         fraction = Double(remaining) / 100
         resetText = Self.resetText(resetsAt: window.resetsAt, now: now)
+        resetAtText = Self.resetAtText(resetsAt: window.resetsAt, calendar: calendar)
         color = MenuBarQuotaColor(remainingPercent: remaining)
     }
 
@@ -86,6 +93,16 @@ struct MenuBarQuotaStatus {
         if days == 0 { return "\(hours) 小时后重置" }
         if hours == 0 { return "\(days) 天后重置" }
         return "\(days) 天 \(hours) 小时后重置"
+    }
+
+    private static func resetAtText(resetsAt: Int64?, calendar: Calendar) -> String {
+        guard let resetsAt else { return "重置时间 --" }
+        let components = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: Date(timeIntervalSince1970: TimeInterval(resetsAt))
+        )
+        return "\(components.year ?? 0)年\(components.month ?? 0)月\(components.day ?? 0)日 "
+            + String(format: "%02d:%02d 重置", components.hour ?? 0, components.minute ?? 0)
     }
 }
 

@@ -437,6 +437,24 @@ import Testing
     #expect(status.weeklyQuota.remainingText == "-- 剩余")
     #expect(status.weeklyQuota.fraction == 0)
     #expect(status.weeklyQuota.resetText == "重置时间 --")
+    #expect(status.weeklyQuota.resetAtText == "重置时间 --")
+}
+
+@Test func quotaStatusFormatsAbsoluteResetInProvidedCalendar() {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let resetDate = calendar.date(
+        from: DateComponents(year: 2026, month: 7, day: 20, hour: 1, minute: 2)
+    )!
+    let window = CodexRateLimitWindow(
+        usedPercent: 42,
+        windowDurationMins: 10_080,
+        resetsAt: Int64(resetDate.timeIntervalSince1970)
+    )
+
+    let status = MenuBarQuotaStatus(window: window, now: 1_000, calendar: calendar)
+
+    #expect(status.resetAtText == "2026年7月20日 01:02 重置")
 }
 
 @Test func menuBarStatusClampsInvalidInputs() throws {

@@ -260,7 +260,8 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
             rateLimits: model.rateLimitSnapshot,
             account: model.accountSnapshot,
             isLoading: model.isLoading,
-            isRefreshing: refreshState.isRefreshing || model.isScanningTokenUsage
+            isRefreshing: refreshState.isRefreshing || model.isRefreshingUsage
+                || model.isScanningTokenUsage
         )
     }
 
@@ -268,6 +269,7 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
         guard
             let model,
             !refreshState.isRefreshing,
+            !model.isRefreshingUsage,
             !model.isLoading,
             !model.isScanningTokenUsage
         else { return }

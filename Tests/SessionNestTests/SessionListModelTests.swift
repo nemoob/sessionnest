@@ -88,6 +88,93 @@ import Testing
 }
 
 @MainActor
+@Test func lightweightRateLimitRefreshPublishesProgressAndCompletionMetadata() async throws {
+    let fixture = try SessionModelFixture(
+        threadID: "lightweight-rate-limit-state",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let probe = DeferredRateLimitRefreshProbe(
+        snapshot: try weeklyRateLimitSnapshot(usedPercent: 6)
+    )
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        rateLimitRefreshOperation: { try await probe.load() }
+    )
+
+    let refresh = Task { await model.refreshRateLimits() }
+    try await waitForTokenCondition { await probe.callCount == 1 }
+
+    #expect(model.isRefreshingUsage)
+    #expect(model.lastSuccessfulUsageRefreshAt == nil)
+
+    await probe.release()
+    await refresh.value
+
+    #expect(!model.isRefreshingUsage)
+    #expect(model.lastSuccessfulUsageRefreshAt != nil)
+    #expect(model.usageRefreshErrorMessage == nil)
+}
+
+@MainActor
+@Test func lightweightRateLimitRefreshPublishesFailureWithoutDiscardingSuccess() async throws {
+    let fixture = try SessionModelFixture(
+        threadID: "lightweight-rate-limit-failure",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let snapshot = try weeklyRateLimitSnapshot(usedPercent: 6)
+    let probe = RateLimitRefreshProbe(snapshot: snapshot)
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        rateLimitRefreshOperation: { try await probe.load() }
+    )
+
+    await model.refreshRateLimits()
+    let lastSuccess = try #require(model.lastSuccessfulUsageRefreshAt)
+    await probe.failSubsequentLoads()
+    await model.refreshRateLimits()
+
+    #expect(model.rateLimitSnapshot == snapshot)
+    #expect(model.lastSuccessfulUsageRefreshAt == lastSuccess)
+    #expect(model.usageRefreshErrorMessage != nil)
+    #expect(!model.isRefreshingUsage)
+}
+
+@MainActor
+@Test func lightweightRateLimitRefreshSkipsFreshSnapshot() async throws {
+    let fixture = try SessionModelFixture(
+        threadID: "lightweight-rate-limit-stale-policy",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let probe = RateLimitRefreshProbe(
+        snapshot: try weeklyRateLimitSnapshot(usedPercent: 6)
+    )
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        rateLimitRefreshOperation: { try await probe.load() }
+    )
+    let firstRefresh = Date(timeIntervalSinceReferenceDate: 10_000)
+
+    await model.refreshRateLimits(now: firstRefresh)
+    await model.refreshRateLimitsIfStale(
+        now: firstRefresh.addingTimeInterval(599),
+        maximumAge: 600
+    )
+    #expect(await probe.callCount == 1)
+
+    await model.refreshRateLimitsIfStale(
+        now: firstRefresh.addingTimeInterval(600),
+        maximumAge: 600
+    )
+    #expect(await probe.callCount == 2)
+}
+
+@MainActor
 @Test func lightweightUsageRefreshPublishesResetCreditsAtomically() async throws {
     let fixture = try SessionModelFixture(
         threadID: "lightweight-usage",
@@ -734,6 +821,28 @@ import Testing
     #expect(result.map(\.id) == ["a", "b"])
 }
 
+@Test func tokenScanQuotaSelectionShowsAllActiveThreads() {
+    let threads = [
+        directoryThread("a", cwd: "/work/a", updatedAt: 2),
+        directoryThread("b", cwd: "/work/b", updatedAt: 1),
+    ]
+
+    let result = SessionFilter.apply(
+        threads: threads,
+        metadata: [:],
+        tags: [],
+        threadTags: [:],
+        threadProjects: [:],
+        selection: .quota,
+        query: "",
+        timeFilter: .all,
+        sortOrder: .recent,
+        now: 100
+    )
+
+    #expect(result.map(\.id) == ["a", "b"])
+}
+
 @MainActor
 @Test func tokenScanReloadPublishesCachedUsage() async throws {
     let fixture = try SessionModelFixture(threadID: "cached", createRollout: true)
@@ -934,6 +1043,7 @@ private actor DeferredReloadProbe {
 
 private actor RateLimitRefreshProbe {
     let snapshot: CodexRateLimitSnapshot
+    private(set) var callCount = 0
     private var shouldFail = false
 
     init(snapshot: CodexRateLimitSnapshot) {
@@ -941,6 +1051,7 @@ private actor RateLimitRefreshProbe {
     }
 
     func load() throws -> CodexRateLimitSnapshot {
+        callCount += 1
         if shouldFail { throw RateLimitRefreshTestError.expectedFailure }
         return snapshot
     }

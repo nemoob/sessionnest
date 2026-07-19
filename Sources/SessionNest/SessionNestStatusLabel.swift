@@ -87,7 +87,8 @@ struct SessionNestStatusLabel: View {
             rateLimits: model.rateLimitSnapshot,
             account: model.accountSnapshot,
             isLoading: model.isLoading,
-            isRefreshing: refreshState.isRefreshing || model.isScanningTokenUsage
+            isRefreshing: refreshState.isRefreshing || model.isRefreshingUsage
+                || model.isScanningTokenUsage
         )
     }
 }
