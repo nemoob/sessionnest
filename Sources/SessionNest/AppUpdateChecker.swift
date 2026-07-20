@@ -1,5 +1,5 @@
-import Foundation
 import Combine
+import Foundation
 
 struct AppVersion: Comparable, Equatable, Sendable {
     let major: Int
@@ -191,9 +191,10 @@ final class AppUpdateChecker: ObservableObject {
         defaults: UserDefaults = .standard,
         session: URLSession = .shared
     ) -> AppUpdateChecker {
-        let bundleVersion = bundle.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String
+        let bundleVersion =
+            bundle.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+            ) as? String
         return AppUpdateChecker(
             currentVersion: AppVersion.current(bundleVersion: bundleVersion),
             preferences: AppUpdatePreferences(defaults: defaults),
@@ -231,7 +232,8 @@ final class AppUpdateChecker: ObservableObject {
             if case .available = previousState {
                 state = previousState
             } else {
-                state = trigger == .manual
+                state =
+                    trigger == .manual
                     ? .failed("无法检查更新，请稍后重试。")
                     : .idle
             }
@@ -251,7 +253,8 @@ final class AppUpdateChecker: ObservableObject {
 
     private func makeRequest() -> URLRequest {
         GitHubReleaseAPI.makeRequest(
-            currentVersion: "\(currentVersion.major).\(currentVersion.minor).\(currentVersion.patch)"
+            currentVersion:
+                "\(currentVersion.major).\(currentVersion.minor).\(currentVersion.patch)"
         )
     }
 

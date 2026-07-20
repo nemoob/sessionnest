@@ -22,17 +22,26 @@ final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDel
     private var startupError: String?
     private var statusItemController: SessionNestStatusItemController?
     private var mainWindowController: NSWindowController?
+    private var updateChecker: AppUpdateChecker?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         apply(.launch)
         prepareSession()
 
-        let controller = SessionNestStatusItemController(model: model)
+        let updateChecker = AppUpdateChecker.live()
+        self.updateChecker = updateChecker
+        let controller = SessionNestStatusItemController(
+            model: model,
+            updateChecker: updateChecker
+        )
         statusItemController = controller
         controller.setOpenMainWindowAction { [weak self] in
             self?.openMainWindow()
         }
         controller.install()
+        Task {
+            await updateChecker.check(.automatic)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

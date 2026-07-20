@@ -35,7 +35,8 @@ import Testing
 
 @Test func githubReleaseDecodesPublicReleaseFields() throws {
     let data = Data(
-        #"{"tag_name":"v0.2.4","html_url":"https://github.com/nemoob/sessionnest/releases/tag/v0.2.4","name":"SessionNest v0.2.4","body":"Daily update checking"}"#.utf8
+        #"{"tag_name":"v0.2.4","html_url":"https://github.com/nemoob/sessionnest/releases/tag/v0.2.4","name":"SessionNest v0.2.4","body":"Daily update checking"}"#
+            .utf8
     )
 
     let release = try JSONDecoder().decode(GitHubRelease.self, from: data)

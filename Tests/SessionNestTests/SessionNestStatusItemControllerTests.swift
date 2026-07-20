@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import Testing
 
 @testable import SessionNest
@@ -14,6 +15,40 @@ import Testing
     #expect(SessionNestStatusPopoverHeaderLayout.buttonDiameter == 30)
     #expect(SessionNestStatusPopoverHeaderLayout.iconSize == 16)
     #expect(SessionNestStatusPopoverHeaderLayout.dividerHeight == 18)
+}
+
+@Test func updateNoticeAppearsOnlyForAvailableRelease() {
+    let update = AppUpdate(
+        version: AppVersion(tag: "0.2.4")!,
+        tagName: "v0.2.4",
+        releaseURL: URL(
+            string: "https://github.com/nemoob/sessionnest/releases/tag/v0.2.4"
+        )!,
+        summary: "每天自动检查更新"
+    )
+
+    #expect(AppUpdateNotice.resolve(.available(update))?.title == "发现新版本 v0.2.4")
+    #expect(AppUpdateNotice.resolve(.available(update))?.summary == "每天自动检查更新")
+    #expect(AppUpdateNotice.resolve(.upToDate) == nil)
+    #expect(AppUpdateNotice.resolve(.idle) == nil)
+}
+
+@Test func updateSettingsStatusExplainsManualCheckResults() {
+    let update = AppUpdate(
+        version: AppVersion(tag: "0.2.4")!,
+        tagName: "v0.2.4",
+        releaseURL: URL(
+            string: "https://github.com/nemoob/sessionnest/releases/tag/v0.2.4"
+        )!,
+        summary: nil
+    )
+
+    #expect(AppUpdateSettingsStatus.resolve(.idle) == nil)
+    #expect(AppUpdateSettingsStatus.resolve(.checking)?.text == "正在检查更新…")
+    #expect(AppUpdateSettingsStatus.resolve(.upToDate)?.text == "已是最新版本")
+    #expect(AppUpdateSettingsStatus.resolve(.available(update))?.text == "可更新至 v0.2.4")
+    #expect(AppUpdateSettingsStatus.resolve(.failed("网络不可用"))?.text == "网络不可用")
+    #expect(AppUpdateSettingsStatus.resolve(.failed("网络不可用"))?.isError == true)
 }
 
 @Test func statusItemClickRoutesLeftAndRightMouseButtons() {

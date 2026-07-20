@@ -251,9 +251,45 @@ private enum StatusPopoverPage {
     case settings
 }
 
+struct AppUpdateNotice: Equatable {
+    let update: AppUpdate
+    let title: String
+    let summary: String?
+
+    static func resolve(_ state: AppUpdateCheckState) -> Self? {
+        guard case .available(let update) = state else { return nil }
+        return Self(
+            update: update,
+            title: "发现新版本 \(update.tagName)",
+            summary: update.summary
+        )
+    }
+}
+
+struct AppUpdateSettingsStatus: Equatable {
+    let text: String
+    let isError: Bool
+
+    static func resolve(_ state: AppUpdateCheckState) -> Self? {
+        switch state {
+        case .idle:
+            nil
+        case .checking:
+            Self(text: "正在检查更新…", isError: false)
+        case .upToDate:
+            Self(text: "已是最新版本", isError: false)
+        case .available(let update):
+            Self(text: "可更新至 \(update.tagName)", isError: false)
+        case .failed(let message):
+            Self(text: message, isError: true)
+        }
+    }
+}
+
 struct SessionNestStatusPopover: View {
     @ObservedObject var model: SessionListModel
     @ObservedObject var refreshState: StatusItemRefreshState
+    @ObservedObject var updateChecker: AppUpdateChecker
     @Environment(\.openURL) private var openURL
     @State private var page = StatusPopoverPage.overview
     @AppStorage("sessionnest.theme") private var storedTheme = AppTheme.system.rawValue
@@ -351,6 +387,10 @@ struct SessionNestStatusPopover: View {
                             Image(systemName: "rectangle.split.2x1")
                         }
                     }
+                }
+
+                if let notice = AppUpdateNotice.resolve(updateChecker.state) {
+                    updateNoticeBanner(notice)
                 }
 
                 Text("配额")
@@ -489,9 +529,77 @@ struct SessionNestStatusPopover: View {
             }
             .pickerStyle(.segmented)
 
+            Divider()
+
+            Text("更新")
+                .font(.title2.weight(.semibold))
+            Text("每天最多连接 GitHub 检查一次，不会自动下载或安装应用。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Toggle(
+                "每天自动检查更新",
+                isOn: Binding(
+                    get: { updateChecker.automaticallyChecksForUpdates },
+                    set: { isEnabled in
+                        updateChecker.setAutomaticChecksEnabled(isEnabled)
+                        if isEnabled {
+                            Task { await updateChecker.check(.automatic) }
+                        }
+                    }
+                )
+            )
+
+            HStack(spacing: 10) {
+                Button("立即检查") {
+                    Task { await updateChecker.check(.manual) }
+                }
+                .disabled(updateChecker.state.isChecking)
+
+                if let status = AppUpdateSettingsStatus.resolve(updateChecker.state) {
+                    Text(status.text)
+                        .font(.caption)
+                        .foregroundStyle(status.isError ? Color.red : Color.secondary)
+                }
+            }
+
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func updateNoticeBanner(_ notice: AppUpdateNotice) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(notice.title, systemImage: "arrow.down.circle.fill")
+                .font(.subheadline.weight(.semibold))
+
+            if let summary = notice.summary {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 10) {
+                Button("查看更新") {
+                    openURL(notice.update.releaseURL)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button("忽略此版本") {
+                    updateChecker.ignoreAvailableVersion()
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(
+            Color.accentColor.opacity(0.10),
+            in: RoundedRectangle(cornerRadius: 10)
+        )
     }
 
     private var resetCredits: some View {

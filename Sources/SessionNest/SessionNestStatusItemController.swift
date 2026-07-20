@@ -72,6 +72,7 @@ struct StatusPopoverStatisticsScope {
 @MainActor
 final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopoverDelegate {
     private let model: SessionListModel?
+    private let updateChecker: AppUpdateChecker
     private let refreshState = StatusItemRefreshState()
     private var statusItem: NSStatusItem?
     private let menu = NSMenu()
@@ -82,8 +83,9 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
     private var globalMouseMonitor: Any?
     private var quotaRefreshTimer: Timer?
 
-    init(model: SessionListModel?) {
+    init(model: SessionListModel?, updateChecker: AppUpdateChecker) {
         self.model = model
+        self.updateChecker = updateChecker
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -310,6 +312,7 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
                 rootView: SessionNestStatusPopover(
                     model: model,
                     refreshState: refreshState,
+                    updateChecker: updateChecker,
                     refresh: { [weak self] in self?.refresh() },
                     openMainWindow: { [weak self] in self?.openSessionNest() },
                     quit: { [weak self] in self?.quitSessionNest() }
@@ -320,6 +323,7 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
             Task {
                 await model.refreshRateLimits()
                 await model.reloadIfStale()
+                await updateChecker.check(.automatic)
             }
         }
     }
