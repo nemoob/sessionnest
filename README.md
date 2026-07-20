@@ -27,6 +27,8 @@ SessionNest is an independent open-source project and is not affiliated with or 
   expirations from a dedicated main-window dashboard or the menu bar
 - Hover over or select a day in the Token trend chart to inspect its complete Token breakdown
 - Monitor session count and Token-statistics coverage from the menu bar
+- Check GitHub Releases at most once every 24 hours and open the trusted release page when an
+  update is available
 - Follow the system appearance or choose a light or dark theme
 
 ## Build and test
@@ -106,6 +108,12 @@ only from the project Token ranking so temporary scratch directories are not pre
 
 SessionNest has no telemetry, accounts, cloud synchronization, or analytics service. SessionNest
 metadata and calculated statistics remain on this Mac.
+
+When automatic update checks are enabled, SessionNest contacts GitHub's public Releases API at most
+once every 24 hours. The request includes only the app version in its user agent and does not upload
+session, account, Token, or project data. The preference, last-attempt time, and ignored release are
+stored in local user defaults. SessionNest only opens the selected GitHub release page; it does not
+download or install updates automatically.
 
 ## Contributing
 
