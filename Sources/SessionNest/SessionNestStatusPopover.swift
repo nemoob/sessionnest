@@ -320,6 +320,8 @@ struct SessionNestStatusPopover: View {
     @Environment(\.openURL) private var openURL
     @State private var page = StatusPopoverPage.overview
     @AppStorage("sessionnest.theme") private var storedTheme = AppTheme.system.rawValue
+    @AppStorage(SessionNestLaunchPreference.opensMainWindowKey)
+    private var opensMainWindowOnLaunch = false
     let refresh: () -> Void
     let openMainWindow: () -> Void
     let quit: () -> Void
@@ -556,6 +558,19 @@ struct SessionNestStatusPopover: View {
                 }
             }
             .pickerStyle(.segmented)
+
+            Divider()
+
+            Text("启动")
+                .font(.title2.weight(.semibold))
+            Text("选择启动 SessionNest 时是否显示主窗口。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Toggle("启动时默认打开主窗口", isOn: $opensMainWindowOnLaunch)
+            Text("下次启动时生效")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Divider()
 
