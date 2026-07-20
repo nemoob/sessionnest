@@ -17,6 +17,16 @@ import Testing
     #expect(SessionNestStatusPopoverHeaderLayout.dividerHeight == 18)
 }
 
+@Test func refreshButtonStaysVisuallyEnabledWhileAnimating() {
+    let idle = RefreshButtonVisualState(isRefreshing: false)
+    let refreshing = RefreshButtonVisualState(isRefreshing: true)
+
+    #expect(idle.isVisuallyEnabled)
+    #expect(!idle.isAnimating)
+    #expect(refreshing.isVisuallyEnabled)
+    #expect(refreshing.isAnimating)
+}
+
 @Test func updateNoticeAppearsOnlyForAvailableRelease() {
     let update = AppUpdate(
         version: AppVersion(tag: "0.2.4")!,

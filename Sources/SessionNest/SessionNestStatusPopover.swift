@@ -38,6 +38,33 @@ enum SessionNestStatusPopoverHeaderLayout {
     static let dividerHeight: CGFloat = 18
 }
 
+struct RefreshButtonVisualState: Equatable {
+    let isVisuallyEnabled = true
+    let isAnimating: Bool
+
+    init(isRefreshing: Bool) {
+        isAnimating = isRefreshing
+    }
+}
+
+private struct RefreshHeaderSymbol: View {
+    let isAnimating: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30, paused: !isAnimating)) { context in
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .rotationEffect(.degrees(rotationAngle(at: context.date)))
+        }
+    }
+
+    private func rotationAngle(at date: Date) -> Double {
+        guard isAnimating else { return 0 }
+        let duration = 0.8
+        return date.timeIntervalSinceReferenceDate
+            .truncatingRemainder(dividingBy: duration) / duration * 360
+    }
+}
+
 private struct StatusPopoverHeaderButton<Label: View>: View {
     let title: String
     let isEnabled: Bool
@@ -336,6 +363,7 @@ struct SessionNestStatusPopover: View {
             isScanningTokenUsage: model.isScanningTokenUsage
         )
         let resetCredits = MenuBarResetCreditsStatus(summary: model.resetCreditsSnapshot)
+        let refreshButtonState = RefreshButtonVisualState(isRefreshing: status.showsProgress)
 
         return ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -375,10 +403,10 @@ struct SessionNestStatusPopover: View {
 
                         StatusPopoverHeaderButton(
                             title: "刷新",
-                            isEnabled: !status.showsProgress,
+                            isEnabled: refreshButtonState.isVisuallyEnabled,
                             action: refresh
                         ) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
+                            RefreshHeaderSymbol(isAnimating: refreshButtonState.isAnimating)
                         }
                         StatusPopoverHeaderButton(
                             title: "打开 SessionNest",
