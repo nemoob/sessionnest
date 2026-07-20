@@ -1,21 +1,50 @@
 import AppKit
 import SwiftUI
 
-final class SessionNestAppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+enum SessionNestPresentationTransition {
+    case launch
+    case openMainWindow
+    case closeMainWindow
+
+    var activationPolicy: NSApplication.ActivationPolicy {
+        switch self {
+        case .launch, .closeMainWindow:
+            .accessory
+        case .openMainWindow:
+            .regular
+        }
     }
 }
 
-@main
-struct SessionNestApp: App {
-    @NSApplicationDelegateAdaptor(SessionNestAppDelegate.self) private var appDelegate
-    @AppStorage("sessionnest.theme") private var storedTheme = AppTheme.system.rawValue
-    private let model: SessionListModel?
-    private let startupError: String?
-    private let statusItemController: SessionNestStatusItemController
+@MainActor
+final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private var model: SessionListModel?
+    private var startupError: String?
+    private var statusItemController: SessionNestStatusItemController?
+    private var mainWindowController: NSWindowController?
 
-    init() {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        apply(.launch)
+        prepareSession()
+
+        let controller = SessionNestStatusItemController(model: model)
+        statusItemController = controller
+        controller.setOpenMainWindowAction { [weak self] in
+            self?.openMainWindow()
+        }
+        controller.install()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard notification.object as? NSWindow === mainWindowController?.window else { return }
+        apply(.closeMainWindow)
+    }
+
+    private func prepareSession() {
         do {
             let applicationSupport = FileManager.default.urls(
                 for: .applicationSupportDirectory,
@@ -33,50 +62,76 @@ struct SessionNestApp: App {
             )
             let store = try MetadataStore(databaseURL: databaseURL)
             let client = try CodexClient()
-            let model = SessionListModel(client: client, store: store)
-            self.model = model
+            model = SessionListModel(client: client, store: store)
             startupError = nil
-            statusItemController = SessionNestStatusItemController(model: model)
         } catch {
             model = nil
             startupError = error.localizedDescription
-            statusItemController = SessionNestStatusItemController(model: nil)
         }
     }
 
+    private func openMainWindow() {
+        apply(.openMainWindow)
+
+        let controller = mainWindowController ?? makeMainWindowController()
+        mainWindowController = controller
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func makeMainWindowController() -> NSWindowController {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "SessionNest"
+        window.contentMinSize = NSSize(width: 900, height: 600)
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.contentViewController = NSHostingController(
+            rootView: SessionNestMainWindowContent(
+                model: model,
+                startupError: startupError
+            )
+        )
+        window.center()
+        return NSWindowController(window: window)
+    }
+
+    private func apply(_ transition: SessionNestPresentationTransition) {
+        NSApp.setActivationPolicy(transition.activationPolicy)
+    }
+}
+
+@main
+struct SessionNestApp: App {
+    @NSApplicationDelegateAdaptor(SessionNestAppDelegate.self) private var appDelegate
+
     var body: some Scene {
-        Window("SessionNest", id: "main") {
-            Group {
-                if let model {
-                    SessionManagerView(model: model)
-                        .frame(minWidth: 900, minHeight: 600)
-                } else {
-                    StartupErrorView(message: startupError ?? "未知启动错误")
-                        .frame(minWidth: 680, minHeight: 420)
-                }
-            }
-            .preferredColorScheme(AppTheme(storedValue: storedTheme).colorScheme)
-            .background {
-                StatusItemOpenWindowBridge(controller: statusItemController)
-            }
+        Settings {
+            EmptyView()
         }
     }
 }
 
-private struct StatusItemOpenWindowBridge: View {
-    let controller: SessionNestStatusItemController
-    @Environment(\.openWindow) private var openWindow
+private struct SessionNestMainWindowContent: View {
+    let model: SessionListModel?
+    let startupError: String?
+    @AppStorage("sessionnest.theme") private var storedTheme = AppTheme.system.rawValue
 
     var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .onAppear {
-                controller.install()
-                controller.setOpenMainWindowAction {
-                    openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
-                }
+        Group {
+            if let model {
+                SessionManagerView(model: model)
+            } else {
+                StartupErrorView(message: startupError ?? "未知启动错误")
             }
+        }
+        .frame(minWidth: 900, minHeight: 600)
+        .preferredColorScheme(AppTheme(storedValue: storedTheme).colorScheme)
     }
 }
 
