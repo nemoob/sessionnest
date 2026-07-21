@@ -1,3 +1,4 @@
+import AppKit
 import Charts
 import SwiftUI
 
@@ -44,6 +45,32 @@ struct RefreshButtonVisualState: Equatable {
 
     init(isRefreshing: Bool) {
         isAnimating = isRefreshing
+    }
+}
+
+enum StatusPopoverScreenshotFeedback: Equatable {
+    case idle
+    case copied
+    case failed
+
+    var systemImage: String {
+        switch self {
+        case .idle: "camera"
+        case .copied: "checkmark"
+        case .failed: "exclamationmark.triangle"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .idle: "复制完整截图（包含账号信息）"
+        case .copied: "完整截图已复制，可直接粘贴"
+        case .failed: "截图失败，请重试"
+        }
+    }
+
+    var errorText: String? {
+        self == .failed ? title : nil
     }
 }
 
@@ -319,6 +346,7 @@ struct SessionNestStatusPopover: View {
     @ObservedObject var updateChecker: AppUpdateChecker
     @Environment(\.openURL) private var openURL
     @State private var page = StatusPopoverPage.overview
+    @State private var screenshotFeedback = StatusPopoverScreenshotFeedback.idle
     @AppStorage("sessionnest.theme") private var storedTheme = AppTheme.system.rawValue
     @AppStorage(SessionNestLaunchPreference.opensMainWindowKey)
     private var opensMainWindowOnLaunch = false
@@ -346,6 +374,14 @@ struct SessionNestStatusPopover: View {
     }
 
     private var overview: some View {
+        ScrollView {
+            overviewContent(includesScreenshotAction: true)
+                .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
+        }
+        .padding(.trailing, -SessionNestStatusPopoverLayout.scrollViewTrailingExtension)
+    }
+
+    private func overviewContent(includesScreenshotAction: Bool) -> some View {
         let now = Int64(Date().timeIntervalSince1970)
         let calendar = Calendar.current
         let statisticsScope = StatusPopoverStatisticsScope.resolve(
@@ -370,172 +406,209 @@ struct SessionNestStatusPopover: View {
         let resetCredits = MenuBarResetCreditsStatus(summary: model.resetCreditsSnapshot)
         let refreshButtonState = RefreshButtonVisualState(isRefreshing: status.showsProgress)
 
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("SessionNest")
-                            .font(.headline)
-                        HStack(spacing: 4) {
-                            Text(status.account.planText)
-                            Text(status.account.emailText)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.orange.opacity(0.14), in: Capsule())
-                    }
-                    Spacer()
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SessionNest")
+                        .font(.headline)
                     HStack(spacing: 4) {
-                        ForEach(SessionNestPublicLink.allCases, id: \.self) { link in
-                            StatusPopoverHeaderButton(title: link.title) {
-                                openURL(link.url)
-                            } label: {
-                                publicLinkIcon(link.icon)
-                            }
-                        }
-
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.14))
-                            .frame(
-                                width: 1,
-                                height: SessionNestStatusPopoverHeaderLayout.dividerHeight
-                            )
-                            .padding(.horizontal, 2)
-
-                        StatusPopoverHeaderButton(
-                            title: "刷新",
-                            isEnabled: refreshButtonState.isVisuallyEnabled,
-                            action: refresh
-                        ) {
-                            RefreshHeaderSymbol(isAnimating: refreshButtonState.isAnimating)
-                        }
-                        StatusPopoverHeaderButton(
-                            title: "打开 SessionNest",
-                            action: openMainWindow
-                        ) {
-                            Image(systemName: "rectangle.split.2x1")
-                        }
-                    }
-                }
-
-                if let notice = AppUpdateNotice.resolve(updateChecker.state) {
-                    updateNoticeBanner(notice)
-                }
-
-                Text("配额")
-                    .font(.subheadline.weight(.semibold))
-                quotaRow(title: "每周", quota: status.weeklyQuota)
-                Text(statisticsScope.dailyTokenTitle)
-                    .font(.subheadline.weight(.semibold))
-                DailyTokenUsageChart(
-                    points: statistics.dailyPoints,
-                    now: now,
-                    calendar: calendar
-                )
-                resetCreditsRow(resetCredits)
-
-                Text(statisticsScope.title)
-                    .font(.subheadline.weight(.semibold))
-                if statistics.showsTokenScanProgress {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("正在统计 Token…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                VStack(spacing: 10) {
-                    HStack(spacing: 10) {
-                        metricCard(
-                            title: "会话",
-                            value: statistics.sessionValueText,
-                            detail: statistics.sessionDetailText
-                        )
-                        metricCard(
-                            title: "总 Token",
-                            value: statistics.totalTokenValueText,
-                            detail: statistics.totalTokenDetailText
-                        )
-                    }
-                    HStack(spacing: 10) {
-                        metricCard(
-                            title: "平均 / 会话",
-                            value: statistics.averageValueText,
-                            detail: statistics.averageDetailText
-                        )
-                        metricCard(
-                            title: "缓存输入",
-                            value: statistics.cachedInputValueText,
-                            detail: statistics.cachedInputDetailText
-                        )
-                    }
-                }
-
-                Text("Token 趋势")
-                    .font(.subheadline.weight(.semibold))
-                if statistics.dailyPoints.isEmpty {
-                    Text(statistics.tokenTrendEmptyText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    tokenTrend(statistics)
-                }
-
-                Text("项目 Token")
-                    .font(.subheadline.weight(.semibold))
-                if statistics.topProjects.isEmpty {
-                    Text(statistics.projectTokenEmptyText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    VStack(spacing: 8) {
-                        ForEach(statistics.topProjects) { project in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(project.projectName)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Text(statistics.compact(project.usage.totalTokens))
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                }
-                                ProgressView(value: statistics.projectFraction(project))
-                            }
-                        }
+                        Text(status.account.planText)
+                        Text(status.account.emailText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     .font(.caption)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.14), in: Capsule())
                 }
-
-                Text("Token 覆盖")
-                    .font(.subheadline.weight(.semibold))
-                HStack {
-                    Text("\(snapshot.totalSessionCount) 个会话")
-                    Spacer()
-                    Text(status.tokenCoveragePercentText)
-                        .foregroundStyle(.secondary)
-                }
-                ProgressView(value: status.tokenCoverageFraction)
-                Text(status.tokenCoverageText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Divider()
-                HStack {
-                    Button("设置") {
-                        page = .settings
+                Spacer()
+                HStack(spacing: 4) {
+                    ForEach(SessionNestPublicLink.allCases, id: \.self) { link in
+                        StatusPopoverHeaderButton(title: link.title) {
+                            openURL(link.url)
+                        } label: {
+                            publicLinkIcon(link.icon)
+                        }
                     }
-                    Spacer()
-                    Button("退出", action: quit)
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.14))
+                        .frame(
+                            width: 1,
+                            height: SessionNestStatusPopoverHeaderLayout.dividerHeight
+                        )
+                        .padding(.horizontal, 2)
+
+                    if includesScreenshotAction {
+                        StatusPopoverHeaderButton(
+                            title: screenshotFeedback.title,
+                            action: copyCompleteOverview
+                        ) {
+                            Image(systemName: screenshotFeedback.systemImage)
+                        }
+                    }
+                    StatusPopoverHeaderButton(
+                        title: "刷新",
+                        isEnabled: refreshButtonState.isVisuallyEnabled,
+                        action: refresh
+                    ) {
+                        RefreshHeaderSymbol(isAnimating: refreshButtonState.isAnimating)
+                    }
+                    StatusPopoverHeaderButton(
+                        title: "打开 SessionNest",
+                        action: openMainWindow
+                    ) {
+                        Image(systemName: "rectangle.split.2x1")
+                    }
                 }
             }
-            .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
+
+            if includesScreenshotAction, let errorText = screenshotFeedback.errorText {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            if let notice = AppUpdateNotice.resolve(updateChecker.state) {
+                updateNoticeBanner(notice)
+            }
+
+            Text("配额")
+                .font(.subheadline.weight(.semibold))
+            quotaRow(title: "每周", quota: status.weeklyQuota)
+            Text(statisticsScope.dailyTokenTitle)
+                .font(.subheadline.weight(.semibold))
+            DailyTokenUsageChart(
+                points: statistics.dailyPoints,
+                now: now,
+                calendar: calendar
+            )
+            resetCreditsRow(resetCredits)
+
+            Text(statisticsScope.title)
+                .font(.subheadline.weight(.semibold))
+            if statistics.showsTokenScanProgress {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在统计 Token…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            VStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    metricCard(
+                        title: "会话",
+                        value: statistics.sessionValueText,
+                        detail: statistics.sessionDetailText
+                    )
+                    metricCard(
+                        title: "总 Token",
+                        value: statistics.totalTokenValueText,
+                        detail: statistics.totalTokenDetailText
+                    )
+                }
+                HStack(spacing: 10) {
+                    metricCard(
+                        title: "平均 / 会话",
+                        value: statistics.averageValueText,
+                        detail: statistics.averageDetailText
+                    )
+                    metricCard(
+                        title: "缓存输入",
+                        value: statistics.cachedInputValueText,
+                        detail: statistics.cachedInputDetailText
+                    )
+                }
+            }
+
+            Text("Token 趋势")
+                .font(.subheadline.weight(.semibold))
+            if statistics.dailyPoints.isEmpty {
+                Text(statistics.tokenTrendEmptyText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                tokenTrend(statistics)
+            }
+
+            Text("项目 Token")
+                .font(.subheadline.weight(.semibold))
+            if statistics.topProjects.isEmpty {
+                Text(statistics.projectTokenEmptyText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(statistics.topProjects) { project in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(project.projectName)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text(statistics.compact(project.usage.totalTokens))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            ProgressView(value: statistics.projectFraction(project))
+                        }
+                    }
+                }
+                .font(.caption)
+            }
+
+            Text("Token 覆盖")
+                .font(.subheadline.weight(.semibold))
+            HStack {
+                Text("\(snapshot.totalSessionCount) 个会话")
+                Spacer()
+                Text(status.tokenCoveragePercentText)
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: status.tokenCoverageFraction)
+            Text(status.tokenCoverageText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+            HStack {
+                Button("设置") {
+                    page = .settings
+                }
+                Spacer()
+                Button("退出", action: quit)
+            }
         }
-        .padding(.trailing, -SessionNestStatusPopoverLayout.scrollViewTrailingExtension)
+    }
+
+    private var screenshotOverview: some View {
+        overviewContent(includesScreenshotAction: false)
+            .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
+            .padding(16)
+            .frame(width: SessionNestStatusPopoverLayout.width)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .preferredColorScheme(AppTheme(storedValue: storedTheme).colorScheme)
+    }
+
+    @MainActor
+    private func copyCompleteOverview() {
+        do {
+            try StatusPopoverScreenshotCopier().copy(content: screenshotOverview)
+            screenshotFeedback = .copied
+        } catch {
+            screenshotFeedback = .failed
+        }
+        let feedback = screenshotFeedback
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            if screenshotFeedback == feedback {
+                screenshotFeedback = .idle
+            }
+        }
     }
 
     @ViewBuilder

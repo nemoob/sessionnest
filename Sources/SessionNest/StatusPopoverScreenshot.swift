@@ -24,7 +24,9 @@ struct StatusPopoverScreenshotCopier {
             throw StatusPopoverScreenshotError.encodingFailed
         }
         let item = NSPasteboardItem()
-        item.setData(pngData, forType: .png)
+        guard item.setData(pngData, forType: .png) else {
+            throw StatusPopoverScreenshotError.pasteboardWriteFailed
+        }
         guard pasteboard.writeObjects([item]) else {
             throw StatusPopoverScreenshotError.pasteboardWriteFailed
         }
