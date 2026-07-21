@@ -4,20 +4,6 @@ import SwiftUI
 enum TokenTrendChartPresentation {
     case dashboard
     case popover
-
-    var showsCachedSeries: Bool { self == .dashboard }
-
-    var accessibilityLabel: String {
-        self == .popover ? "每日非缓存 Token 趋势" : "每日 Token 趋势"
-    }
-
-    var primarySeriesName: String {
-        self == .popover ? "非缓存 Token" : "总 Token"
-    }
-
-    func primaryTokens(_ usage: TokenUsageBreakdown) -> Int64 {
-        self == .popover ? usage.nonCachedTokens : usage.totalTokens
-    }
 }
 
 struct TokenTrendChart: View {
@@ -44,7 +30,7 @@ struct TokenTrendChart: View {
             hoveredDay = TokenTrendSelection.reconcile(selectedDay: hoveredDay, in: points)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(presentation.accessibilityLabel)
+        .accessibilityLabel("每日 Token 趋势")
         .accessibilityValue(selectedPoint.map(accessibilityValue) ?? "未选择日期")
         .accessibilityAction(named: "上一日") {
             moveSelection(.previous)
@@ -62,21 +48,19 @@ struct TokenTrendChart: View {
         Chart(points) { point in
             LineMark(
                 x: .value("日期", date(point.dayStart)),
-                y: .value("Token", presentation.primaryTokens(point.usage)),
-                series: .value("类型", presentation.primarySeriesName)
+                y: .value("Token", point.usage.totalTokens),
+                series: .value("类型", "总 Token")
             )
-            .foregroundStyle(by: .value("类型", presentation.primarySeriesName))
+            .foregroundStyle(by: .value("类型", "总 Token"))
             .interpolationMethod(.monotone)
 
-            if presentation.showsCachedSeries {
-                LineMark(
-                    x: .value("日期", date(point.dayStart)),
-                    y: .value("Token", point.usage.cachedInputTokens),
-                    series: .value("类型", "缓存输入")
-                )
-                .foregroundStyle(by: .value("类型", "缓存输入"))
-                .interpolationMethod(.monotone)
-            }
+            LineMark(
+                x: .value("日期", date(point.dayStart)),
+                y: .value("Token", point.usage.cachedInputTokens),
+                series: .value("类型", "缓存输入")
+            )
+            .foregroundStyle(by: .value("类型", "缓存输入"))
+            .interpolationMethod(.monotone)
 
             if points.count == 1 && selectedDay != point.dayStart {
                 markers(for: point, size: 36)
@@ -91,7 +75,6 @@ struct TokenTrendChart: View {
         }
         .chartForegroundStyleScale([
             "总 Token": Color.accentColor,
-            "非缓存 Token": Color.accentColor,
             "缓存输入": Color.orange,
         ])
         .chartXAxis(presentation == .popover ? .hidden : .automatic)
@@ -146,19 +129,17 @@ struct TokenTrendChart: View {
     private func markers(for point: StatisticsDailyPoint, size: CGFloat) -> some ChartContent {
         PointMark(
             x: .value("日期", date(point.dayStart)),
-            y: .value("Token", presentation.primaryTokens(point.usage))
+            y: .value("Token", point.usage.totalTokens)
         )
         .foregroundStyle(Color.accentColor)
         .symbolSize(size)
 
-        if presentation.showsCachedSeries {
-            PointMark(
-                x: .value("日期", date(point.dayStart)),
-                y: .value("Token", point.usage.cachedInputTokens)
-            )
-            .foregroundStyle(Color.orange)
-            .symbolSize(size)
-        }
+        PointMark(
+            x: .value("日期", date(point.dayStart)),
+            y: .value("Token", point.usage.cachedInputTokens)
+        )
+        .foregroundStyle(Color.orange)
+        .symbolSize(size)
     }
 
     @ViewBuilder
@@ -212,12 +193,12 @@ struct TokenTrendChart: View {
                 Text(formattedDate(point.dayStart))
                     .font(.caption.weight(.semibold))
                 Spacer()
-                Text("非缓存 \(compact(presentation.primaryTokens(point.usage)))")
+                Text("总计 \(compact(point.usage.totalTokens))")
                     .font(.caption.weight(.semibold))
                     .monospacedDigit()
             }
             HStack {
-                compactDetail("总计", point.usage.totalTokens)
+                compactDetail("输入", point.usage.inputTokens)
                 Spacer()
                 compactDetail("缓存", point.usage.cachedInputTokens)
             }
@@ -277,13 +258,7 @@ struct TokenTrendChart: View {
     }
 
     private func accessibilityValue(_ point: StatisticsDailyPoint) -> String {
-        if presentation == .popover {
-            return "\(formattedDate(point.dayStart))，非缓存 Token "
-                + "\(exact(presentation.primaryTokens(point.usage)))，总 Token "
-                + "\(exact(point.usage.totalTokens))，缓存输入 "
-                + "\(exact(point.usage.cachedInputTokens))"
-        }
-        return "\(formattedDate(point.dayStart))，总 Token \(exact(point.usage.totalTokens))，"
+        "\(formattedDate(point.dayStart))，总 Token \(exact(point.usage.totalTokens))，"
             + "输入 \(exact(point.usage.inputTokens))，缓存输入 "
             + "\(exact(point.usage.cachedInputTokens))，输出 \(exact(point.usage.outputTokens))，"
             + "推理输出 \(exact(point.usage.reasoningOutputTokens))"

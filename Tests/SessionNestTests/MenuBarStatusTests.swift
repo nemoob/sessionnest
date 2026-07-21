@@ -105,15 +105,11 @@ import Testing
 
     #expect(status.sessionValueText == "378")
     #expect(status.sessionDetailText == "已统计 374 / 378")
-    #expect(status.primaryTokenTitle == "非缓存 Token")
-    #expect(status.nonCachedTokenValueText == "5亿")
-    #expect(status.nonCachedTokenDetailText == "500,000,000 Token")
-    #expect(status.averageTitle == "平均非缓存 / 会话")
-    #expect(status.averageValueText == "134万")
+    #expect(status.totalTokenValueText == "57亿")
+    #expect(status.totalTokenDetailText == "5,700,000,000 Token")
+    #expect(status.averageValueText == "1511万")
     #expect(status.cachedInputValueText == "52亿")
     #expect(status.cachedInputDetailText == "5,200,000,000 Token")
-    #expect(status.tokenTrendTitle == "非缓存 Token 趋势")
-    #expect(status.projectTokenTitle == "项目非缓存 Token")
     #expect(status.topProjects.count == 5)
     #expect(status.projectFraction(status.topProjects[0]) == 1)
 }
@@ -176,7 +172,7 @@ import Testing
             projectName: "largest",
             usage: TokenUsageBreakdown(
                 inputTokens: 0,
-                cachedInputTokens: 95,
+                cachedInputTokens: 0,
                 outputTokens: 0,
                 reasoningOutputTokens: 0,
                 totalTokens: 100
@@ -218,28 +214,8 @@ import Testing
     let status = MenuBarStatisticsStatus(snapshot: snapshot)
 
     #expect(status.dailyPoints == dailyPoints)
-    #expect(status.topProjects.map(\.projectPath) == ["/smaller", "/largest", "/invalid"])
-    #expect(status.projectTokenValue(projects[1]) == 25)
-    #expect(status.projectFraction(projects[1]) == 1)
-    #expect(status.projectFraction(projects[0]) == 0.2)
+    #expect(status.projectFraction(projects[1]) == 0.25)
     #expect(status.projectFraction(projects[2]) == 0)
-}
-
-@Test func popoverTokenTrendUsesNonCachedTokensWithoutChangingDashboard() {
-    let usage = TokenUsageBreakdown(
-        inputTokens: 100,
-        cachedInputTokens: 95,
-        outputTokens: 0,
-        reasoningOutputTokens: 0,
-        totalTokens: 100
-    )
-
-    #expect(TokenTrendChartPresentation.popover.primaryTokens(usage) == 5)
-    #expect(TokenTrendChartPresentation.dashboard.primaryTokens(usage) == 100)
-    #expect(!TokenTrendChartPresentation.popover.showsCachedSeries)
-    #expect(TokenTrendChartPresentation.dashboard.showsCachedSeries)
-    #expect(TokenTrendChartPresentation.popover.accessibilityLabel == "每日非缓存 Token 趋势")
-    #expect(TokenTrendChartPresentation.dashboard.accessibilityLabel == "每日 Token 趋势")
 }
 
 @Test func menuBarStatisticsShowsMarkerForSingleDayTrend() {
@@ -286,7 +262,7 @@ import Testing
     #expect(scanning.tokenTrendEmptyText == "正在统计 Token…")
     #expect(scanning.projectTokenEmptyText == "正在统计 Token…")
     #expect(!empty.showsTokenScanProgress)
-    #expect(empty.tokenTrendEmptyText == "暂无非缓存 Token 趋势")
+    #expect(empty.tokenTrendEmptyText == "暂无 Token 趋势")
     #expect(empty.projectTokenEmptyText == "暂无项目统计")
 }
 
@@ -496,34 +472,11 @@ import Testing
 @Test func dailyTokenUsagePresentationFormatsCompactAndExactTokens() {
     #expect(DailyTokenUsagePresentation.compactTokenText(10_000) == "1万")
     #expect(DailyTokenUsagePresentation.exactTokenText(12_345) == "12,345 Token")
-    #expect(DailyTokenUsagePresentation.emptyText == "暂无每日非缓存 Token 记录")
+    #expect(DailyTokenUsagePresentation.emptyText == "暂无每日 Token 记录")
     #expect(
         DailyTokenUsagePresentation.observationCaption
-            == "按本机日志估算非缓存 Token，不代表服务端额度消耗"
+            == "按本机可读取的 Codex 会话记录统计，不代表服务端额度消耗"
     )
-}
-
-@Test func dailyTokenUsagePresentationDerivesNonCachedUsageAndCacheShare() {
-    let usage = TokenUsageBreakdown(
-        inputTokens: 10_400_000_000,
-        cachedInputTokens: 9_900_000_000,
-        outputTokens: 100_000_000,
-        reasoningOutputTokens: 20_000_000,
-        totalTokens: 10_500_000_000
-    )
-    let invalid = TokenUsageBreakdown(
-        inputTokens: 50,
-        cachedInputTokens: 120,
-        outputTokens: 0,
-        reasoningOutputTokens: 0,
-        totalTokens: 100
-    )
-
-    #expect(DailyTokenUsagePresentation.nonCachedTokens(usage) == 600_000_000)
-    #expect(DailyTokenUsagePresentation.cachePercentageText(usage) == "94%")
-    #expect(DailyTokenUsagePresentation.nonCachedTokens(invalid) == 0)
-    #expect(DailyTokenUsagePresentation.cachePercentageText(invalid) == "100%")
-    #expect(DailyTokenUsagePresentation.cachePercentageText(.zero) == "0%")
 }
 
 @Test func dailyTokenUsageSelectionReconcilesSelectedPoint() {
@@ -550,7 +503,7 @@ import Testing
             tokens: 12_345,
             now: now,
             calendar: calendar
-        ) == "今天，2026年7月21日，非缓存 12,345 Token"
+        ) == "今天，2026年7月21日，12,345 Token"
     )
     #expect(
         DailyTokenUsagePresentation.accessibilityLabel(
@@ -558,7 +511,7 @@ import Testing
             tokens: 8_765,
             now: now,
             calendar: calendar
-        ) == "2026年7月19日，非缓存 8,765 Token"
+        ) == "2026年7月19日，8,765 Token"
     )
 }
 

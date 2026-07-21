@@ -15,10 +15,6 @@ struct TokenUsageBreakdown: Codable, Equatable, Sendable {
         totalTokens: 0
     )
 
-    var nonCachedTokens: Int64 {
-        max(0, totalTokens - cachedInputTokens)
-    }
-
     var isZero: Bool { self == .zero }
 
     func componentwiseMaximum(_ other: Self) -> Self {

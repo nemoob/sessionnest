@@ -515,14 +515,14 @@ struct SessionNestStatusPopover: View {
                         detail: statistics.sessionDetailText
                     )
                     metricCard(
-                        title: statistics.primaryTokenTitle,
-                        value: statistics.nonCachedTokenValueText,
-                        detail: statistics.nonCachedTokenDetailText
+                        title: "总 Token",
+                        value: statistics.totalTokenValueText,
+                        detail: statistics.totalTokenDetailText
                     )
                 }
                 HStack(spacing: 10) {
                     metricCard(
-                        title: statistics.averageTitle,
+                        title: "平均 / 会话",
                         value: statistics.averageValueText,
                         detail: statistics.averageDetailText
                     )
@@ -534,7 +534,7 @@ struct SessionNestStatusPopover: View {
                 }
             }
 
-            Text(statistics.tokenTrendTitle)
+            Text("Token 趋势")
                 .font(.subheadline.weight(.semibold))
             if statistics.dailyPoints.isEmpty {
                 Text(statistics.tokenTrendEmptyText)
@@ -544,7 +544,7 @@ struct SessionNestStatusPopover: View {
                 tokenTrend(statistics)
             }
 
-            Text(statistics.projectTokenTitle)
+            Text("项目 Token")
                 .font(.subheadline.weight(.semibold))
             if statistics.topProjects.isEmpty {
                 Text(statistics.projectTokenEmptyText)
@@ -558,7 +558,7 @@ struct SessionNestStatusPopover: View {
                                 Text(project.projectName)
                                     .lineLimit(1)
                                 Spacer()
-                                Text(statistics.compact(statistics.projectTokenValue(project)))
+                                Text(statistics.compact(project.usage.totalTokens))
                                     .foregroundStyle(.secondary)
                                     .monospacedDigit()
                             }
