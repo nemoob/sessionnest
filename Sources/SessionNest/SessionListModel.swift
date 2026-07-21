@@ -420,6 +420,7 @@ final class SessionListModel: ObservableObject {
     @Published private(set) var rateLimitSnapshot: CodexRateLimitSnapshot?
     @Published private(set) var resetCreditsSnapshot: CodexRateLimitResetCreditsSummary?
     @Published private(set) var accountSnapshot: CodexAccountSnapshot?
+    @Published private(set) var quotaDailyUsagePoints: [QuotaDailyUsagePoint] = []
     @Published private(set) var quotaCycleStatisticsSnapshot: StatisticsSnapshot?
     @Published private(set) var lastSuccessfulReloadAt: Date?
     @Published private(set) var lastSuccessfulUsageRefreshAt: Date?
@@ -441,6 +442,7 @@ final class SessionListModel: ObservableObject {
     private let tokenScanOperation: TokenScanOperation
     private let tokenScanTargetDiscoveryOperation: TokenScanTargetDiscoveryOperation
     private let threadReloadOperation: ThreadReloadOperation?
+    private let refreshesUsageDuringReload: Bool
     private var stateRevision = SessionStateRevision()
     private var classificationTask: Task<Void, Never>?
     private var classificationGeneration = 0
@@ -541,6 +543,10 @@ final class SessionListModel: ObservableObject {
                 }.value
             }
         self.threadReloadOperation = threadReloadOperation
+        refreshesUsageDuringReload =
+            threadReloadOperation == nil
+            || rateLimitRefreshOperation != nil
+            || usageRefreshOperation != nil
     }
 
     func reload() async {
@@ -591,7 +597,7 @@ final class SessionListModel: ObservableObject {
                 ThreadProjectIdentityIndex.build(threads: allThreads)
             }.value
             let usageSnapshot =
-                threadReloadOperation == nil ? try? await client.readUsageSnapshot() : nil
+                refreshesUsageDuringReload ? try? await usageRefreshOperation() : nil
             let accountSnapshot =
                 threadReloadOperation == nil ? try? await client.readAccount() : nil
             guard stateRevision.accepts(revision) else { return }
@@ -622,6 +628,12 @@ final class SessionListModel: ObservableObject {
                 usageRefreshErrorMessage = nil
             }
             errorMessage = nil
+            if let usageSnapshot, let lastSuccessfulUsageRefreshAt {
+                await recordQuotaUsage(
+                    from: usageSnapshot.rateLimits,
+                    now: lastSuccessfulUsageRefreshAt
+                )
+            }
             await refreshQuotaCycleStatistics()
             await startProjectClassification(
                 for: allThreads,
@@ -664,6 +676,7 @@ final class SessionListModel: ObservableObject {
                 resetCreditsSnapshot = snapshot.resetCredits
                 lastSuccessfulUsageRefreshAt = now
                 usageRefreshErrorMessage = nil
+                await recordQuotaUsage(from: snapshot.rateLimits, now: now)
                 await refreshQuotaCycleStatistics()
             } catch {
                 usageRefreshErrorMessage = error.localizedDescription
@@ -688,6 +701,34 @@ final class SessionListModel: ObservableObject {
         else { return }
 
         await refreshRateLimits(now: now)
+    }
+
+    private func recordQuotaUsage(from snapshot: CodexRateLimitSnapshot, now: Date) async {
+        guard
+            let weeklyWindow = snapshot.weeklyWindow,
+            let cycleResetsAt = weeklyWindow.resetsAt,
+            cycleResetsAt > 0
+        else { return }
+
+        let capturedAt = Int64(now.timeIntervalSince1970)
+        do {
+            try await store.saveQuotaUsageSample(
+                QuotaUsageSample(
+                    cycleResetsAt: cycleResetsAt,
+                    capturedAt: capturedAt,
+                    usedPercent: weeklyWindow.usedPercent
+                )
+            )
+            let samples = try await store.loadQuotaUsageSamples(cycleResetsAt: cycleResetsAt)
+            quotaDailyUsagePoints = QuotaDailyUsage.build(
+                samples: samples,
+                cycleResetsAt: cycleResetsAt,
+                now: capturedAt,
+                calendar: .current
+            )
+        } catch {
+            // Quota history is best-effort and must not fail a successful usage refresh.
+        }
     }
 
     private func loadThreadLists() async throws -> ([CodexThread], [CodexThread]) {
