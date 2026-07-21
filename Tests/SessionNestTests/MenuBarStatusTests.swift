@@ -479,6 +479,29 @@ import Testing
     )
 }
 
+@Test func dailyTokenUsagePresentationDerivesNonCachedUsageAndCacheShare() {
+    let usage = TokenUsageBreakdown(
+        inputTokens: 10_400_000_000,
+        cachedInputTokens: 9_900_000_000,
+        outputTokens: 100_000_000,
+        reasoningOutputTokens: 20_000_000,
+        totalTokens: 10_500_000_000
+    )
+    let invalid = TokenUsageBreakdown(
+        inputTokens: 50,
+        cachedInputTokens: 120,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 100
+    )
+
+    #expect(DailyTokenUsagePresentation.nonCachedTokens(usage) == 600_000_000)
+    #expect(DailyTokenUsagePresentation.cachePercentageText(usage) == "94%")
+    #expect(DailyTokenUsagePresentation.nonCachedTokens(invalid) == 0)
+    #expect(DailyTokenUsagePresentation.cachePercentageText(invalid) == "100%")
+    #expect(DailyTokenUsagePresentation.cachePercentageText(.zero) == "0%")
+}
+
 @Test func dailyTokenUsageSelectionReconcilesSelectedPoint() {
     let points = [
         dailyTokenPoint(dayStart: 100, totalTokens: 1),

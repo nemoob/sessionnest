@@ -55,6 +55,19 @@ enum DailyTokenUsagePresentation {
         "\(max(0, tokens).formatted(exactNumberFormat)) Token"
     }
 
+    static func nonCachedTokens(_ usage: TokenUsageBreakdown) -> Int64 {
+        max(0, usage.totalTokens - usage.cachedInputTokens)
+    }
+
+    static func cachePercentageText(_ usage: TokenUsageBreakdown) -> String {
+        guard usage.totalTokens > 0 else { return "0%" }
+        let fraction = min(
+            max(Double(usage.cachedInputTokens) / Double(usage.totalTokens), 0),
+            1
+        )
+        return "\(Int((fraction * 100).rounded()))%"
+    }
+
     static func barHeight(tokens: Int64, maximum: Int64) -> CGFloat {
         guard tokens > 0, maximum > 0 else { return 0 }
         return max(3, barAreaHeight * min(CGFloat(tokens) / CGFloat(maximum), 1))
