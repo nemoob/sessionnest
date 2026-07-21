@@ -176,12 +176,16 @@ struct MenuBarResetCreditsStatus {
 struct MenuBarStatisticsStatus {
     let sessionValueText: String
     let sessionDetailText: String
-    let totalTokenValueText: String
-    let totalTokenDetailText: String
+    let primaryTokenTitle = "非缓存 Token"
+    let nonCachedTokenValueText: String
+    let nonCachedTokenDetailText: String
+    let averageTitle = "平均非缓存 / 会话"
     let averageValueText: String
     let averageDetailText: String
     let cachedInputValueText: String
     let cachedInputDetailText: String
+    let tokenTrendTitle = "非缓存 Token 趋势"
+    let projectTokenTitle = "项目非缓存 Token"
     let dailyPoints: [StatisticsDailyPoint]
     let topProjects: [StatisticsProjectRow]
     let showsTokenScanProgress: Bool
@@ -192,14 +196,32 @@ struct MenuBarStatisticsStatus {
     var showsSingleDayTrendMarker: Bool { dailyPoints.count == 1 }
 
     init(snapshot: StatisticsSnapshot, isScanningTokenUsage: Bool = false) {
+        let nonCachedTokens = snapshot.totalUsage.nonCachedTokens
+        let projects = snapshot.projectRows.sorted { lhs, rhs in
+            let lhsTokens = lhs.usage.nonCachedTokens
+            let rhsTokens = rhs.usage.nonCachedTokens
+            if lhsTokens != rhsTokens {
+                return lhsTokens > rhsTokens
+            }
+            let comparison = lhs.projectName.localizedCaseInsensitiveCompare(rhs.projectName)
+            return comparison == .orderedSame
+                ? lhs.projectPath < rhs.projectPath
+                : comparison == .orderedAscending
+        }
+        let topProjects = Array(projects.prefix(5))
+
         sessionValueText = snapshot.totalSessionCount.formatted()
         sessionDetailText =
             "已统计 \(snapshot.measuredSessionCount) / \(snapshot.totalSessionCount)"
-        totalTokenValueText = snapshot.totalUsage.totalTokens.formatted(
+        nonCachedTokenValueText = nonCachedTokens.formatted(
             chineseCompactNumberFormat
         )
-        totalTokenDetailText = "\(snapshot.totalUsage.totalTokens.formatted()) Token"
-        averageValueText = snapshot.averageTokensPerMeasuredSession.formatted(
+        nonCachedTokenDetailText = "\(nonCachedTokens.formatted()) Token"
+        let averageNonCachedTokens =
+            snapshot.measuredSessionCount == 0
+            ? 0
+            : nonCachedTokens / Int64(snapshot.measuredSessionCount)
+        averageValueText = averageNonCachedTokens.formatted(
             chineseCompactNumberFormat
         )
         averageDetailText =
@@ -212,20 +234,24 @@ struct MenuBarStatisticsStatus {
         cachedInputDetailText =
             "\(snapshot.totalUsage.cachedInputTokens.formatted()) Token"
         dailyPoints = snapshot.dailyPoints
-        topProjects = Array(snapshot.projectRows.prefix(5))
+        self.topProjects = topProjects
         showsTokenScanProgress = isScanningTokenUsage
         tokenTrendEmptyText =
-            isScanningTokenUsage ? "正在统计 Token…" : "暂无 Token 趋势"
+            isScanningTokenUsage ? "正在统计 Token…" : "暂无非缓存 Token 趋势"
         projectTokenEmptyText =
             isScanningTokenUsage ? "正在统计 Token…" : "暂无项目统计"
-        maximumProjectTokens = topProjects.first?.usage.totalTokens ?? 0
+        maximumProjectTokens = topProjects.first?.usage.nonCachedTokens ?? 0
+    }
+
+    func projectTokenValue(_ project: StatisticsProjectRow) -> Int64 {
+        project.usage.nonCachedTokens
     }
 
     func projectFraction(_ project: StatisticsProjectRow) -> Double {
         guard maximumProjectTokens > 0 else { return 0 }
         return min(
             1,
-            max(0, Double(project.usage.totalTokens) / Double(maximumProjectTokens))
+            max(0, Double(projectTokenValue(project)) / Double(maximumProjectTokens))
         )
     }
 

@@ -56,7 +56,7 @@ enum DailyTokenUsagePresentation {
     }
 
     static func nonCachedTokens(_ usage: TokenUsageBreakdown) -> Int64 {
-        max(0, usage.totalTokens - usage.cachedInputTokens)
+        usage.nonCachedTokens
     }
 
     static func cachePercentageText(_ usage: TokenUsageBreakdown) -> String {
