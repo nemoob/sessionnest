@@ -547,6 +547,16 @@ import Testing
     )
 }
 
+@Test func quotaDailyUsageChartScalesPlainSwiftUIBarsWithoutInventingUsage() {
+    #expect(QuotaDailyUsagePresentation.barHeight(usedPercent: 0, maximum: 10) == 0)
+    #expect(QuotaDailyUsagePresentation.barHeight(usedPercent: .nan, maximum: 10) == 0)
+    #expect(QuotaDailyUsagePresentation.barHeight(usedPercent: 2, maximum: 10) == 12.4)
+    #expect(
+        QuotaDailyUsagePresentation.barHeight(usedPercent: 20, maximum: 10)
+            == QuotaDailyUsagePresentation.barAreaHeight
+    )
+}
+
 @Test func quotaStatusFormatsAbsoluteResetInProvidedCalendar() {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0)!

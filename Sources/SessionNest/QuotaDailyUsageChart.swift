@@ -1,8 +1,8 @@
-import Charts
 import SwiftUI
 
 enum QuotaDailyUsagePresentation {
     static let chartHeight: CGFloat = 110
+    static let barAreaHeight: CGFloat = 62
     static let emptyText = "从现在开始记录每日额度变化"
     static let observationCaption = "仅统计本地观察到的 Codex 额度快照，无法回溯此前用量"
 
@@ -46,6 +46,17 @@ enum QuotaDailyUsagePresentation {
         return value.formatted(
             .number.precision(.fractionLength(0...1)).locale(Locale(identifier: "zh-Hans-CN"))
         ) + "%"
+    }
+
+    static func barHeight(usedPercent: Double, maximum: Double) -> CGFloat {
+        guard
+            usedPercent.isFinite,
+            usedPercent > 0,
+            maximum.isFinite,
+            maximum > 0
+        else { return 0 }
+
+        return max(3, barAreaHeight * min(usedPercent / maximum, 1))
     }
 
     static func tokenText(
@@ -135,6 +146,14 @@ struct QuotaDailyUsageChart: View {
             .sorted { $0.dayStart < $1.dayStart }
     }
 
+    private var pointsByDay: [Int64: QuotaDailyUsagePoint] {
+        Dictionary(uniqueKeysWithValues: usablePoints.map { ($0.dayStart, $0) })
+    }
+
+    private var maximumObservedPercent: Double {
+        max(10, usablePoints.map(\.usedPercent).max() ?? 10)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if usablePoints.isEmpty {
@@ -165,52 +184,68 @@ struct QuotaDailyUsageChart: View {
     }
 
     private var chart: some View {
-        Chart(usablePoints) { point in
-            BarMark(
-                x: .value("日期", date(point.dayStart)),
-                y: .value("额度消耗", point.usedPercent)
-            )
-            .foregroundStyle(barColor(for: point))
-            .cornerRadius(3)
-            .annotation(position: .top, spacing: 2) {
-                Text(QuotaDailyUsagePresentation.percentage(point.usedPercent))
+        HStack(alignment: .bottom, spacing: 4) {
+            ForEach(dayDomain, id: \.self) { dayStart in
+                dayBar(dayStart)
+            }
+        }
+        .frame(height: QuotaDailyUsagePresentation.chartHeight)
+    }
+
+    private func dayBar(_ dayStart: Int64) -> some View {
+        let point = pointsByDay[dayStart]
+        let isSelected = selectedDay == dayStart
+
+        return Button {
+            guard point != nil else { return }
+            selectedDay = isSelected ? nil : dayStart
+        } label: {
+            VStack(spacing: 4) {
+                Text(QuotaDailyUsagePresentation.percentage(point?.usedPercent))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .opacity(point == nil ? 0 : 1)
+
+                VStack {
+                    Spacer(minLength: 0)
+                    if let point {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(barColor(for: point))
+                            .frame(
+                                height: QuotaDailyUsagePresentation.barHeight(
+                                    usedPercent: point.usedPercent,
+                                    maximum: maximumObservedPercent
+                                )
+                            )
+                    }
+                }
+                .frame(height: QuotaDailyUsagePresentation.barAreaHeight)
+
+                Text(QuotaDailyUsagePresentation.weekdayLabel(dayStart, calendar: calendar))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-            .accessibilityLabel(
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 2)
+            .background {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isSelected ? Color.primary.opacity(0.08) : .clear)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(point == nil)
+        .accessibilityLabel(
+            point.map {
                 QuotaDailyUsagePresentation.accessibilityLabel(
-                    dayStart: point.dayStart,
-                    usedPercent: point.usedPercent,
+                    dayStart: dayStart,
+                    usedPercent: $0.usedPercent,
                     now: now,
                     calendar: calendar
                 )
-            )
-
-            if selectedDay == point.dayStart {
-                RuleMark(x: .value("已选日期", date(point.dayStart)))
-                    .foregroundStyle(.secondary.opacity(0.65))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            }
-        }
-        .chartXScale(domain: dayDomain.map(date))
-        .chartXAxis {
-            AxisMarks(values: dayDomain.map(date)) { value in
-                AxisValueLabel {
-                    if let day = value.as(Date.self) {
-                        Text(
-                            QuotaDailyUsagePresentation.weekdayLabel(
-                                Int64(day.timeIntervalSince1970),
-                                calendar: calendar
-                            )
-                        )
-                    }
-                }
-            }
-        }
-        .chartYAxis(.hidden)
-        .chartXSelection(value: selectedDate)
-        .frame(height: QuotaDailyUsagePresentation.chartHeight)
+            } ?? "\(QuotaDailyUsagePresentation.weekdayLabel(dayStart, calendar: calendar))，无观测数据"
+        )
     }
 
     @ViewBuilder
@@ -238,7 +273,7 @@ struct QuotaDailyUsageChart: View {
             }
             .font(.caption)
         } else {
-            Text("单击或拖动查看日期明细")
+            Text("单击柱条查看日期明细")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -255,21 +290,4 @@ struct QuotaDailyUsageChart: View {
         return quotaColor.swiftUIColor.opacity(isToday ? 1 : 0.32)
     }
 
-    private var selectedDate: Binding<Date?> {
-        Binding(
-            get: { selectedDay.map(date) },
-            set: { selectedDate in
-                selectedDay = selectedDate.flatMap {
-                    QuotaDailyUsageChartSelection.nearestPoint(
-                        to: Int64($0.timeIntervalSince1970.rounded()),
-                        in: usablePoints
-                    )?.dayStart
-                }
-            }
-        )
-    }
-
-    private func date(_ timestamp: Int64) -> Date {
-        Date(timeIntervalSince1970: TimeInterval(timestamp))
-    }
 }
