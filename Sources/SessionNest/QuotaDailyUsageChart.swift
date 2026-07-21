@@ -113,10 +113,7 @@ struct QuotaDailyUsageChart: View {
     let calendar: Calendar
     let quotaColor: MenuBarQuotaColor
 
-    @State private var hoveredDay: Int64?
-    @State private var pinnedDay: Int64?
-
-    private var selectedDay: Int64? { pinnedDay ?? hoveredDay }
+    @State private var selectedDay: Int64?
 
     private var selectedPoint: QuotaDailyUsagePoint? {
         guard let selectedDay else { return nil }
@@ -155,17 +152,16 @@ struct QuotaDailyUsageChart: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .onChange(of: usablePoints.map(\.dayStart)) {
-            pinnedDay = QuotaDailyUsageChartSelection.reconcile(
-                selectedDay: pinnedDay,
-                in: usablePoints
-            )
-            hoveredDay = QuotaDailyUsageChartSelection.reconcile(
-                selectedDay: hoveredDay,
+            selectedDay = QuotaDailyUsageChartSelection.reconcile(
+                selectedDay: selectedDay,
                 in: usablePoints
             )
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("本周期每日消耗")
+        .accessibilityAction(named: "清除选择") {
+            selectedDay = nil
+        }
     }
 
     private var chart: some View {
@@ -213,41 +209,7 @@ struct QuotaDailyUsageChart: View {
             }
         }
         .chartYAxis(.hidden)
-        .chartOverlay { proxy in
-            GeometryReader { geometry in
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .onContinuousHover(coordinateSpace: .local) { phase in
-                        switch phase {
-                        case .active(let location):
-                            hoveredDay =
-                                point(
-                                    at: location,
-                                    proxy: proxy,
-                                    geometry: geometry
-                                )?.dayStart
-                        case .ended:
-                            hoveredDay = nil
-                        }
-                    }
-                    .simultaneousGesture(
-                        SpatialTapGesture().onEnded { value in
-                            guard
-                                let point = point(
-                                    at: value.location,
-                                    proxy: proxy,
-                                    geometry: geometry
-                                )
-                            else {
-                                pinnedDay = nil
-                                return
-                            }
-                            pinnedDay = pinnedDay == point.dayStart ? nil : point.dayStart
-                        }
-                    )
-            }
-        }
+        .chartXSelection(value: selectedDate)
         .frame(height: QuotaDailyUsagePresentation.chartHeight)
     }
 
@@ -276,7 +238,7 @@ struct QuotaDailyUsageChart: View {
             }
             .font(.caption)
         } else {
-            Text("悬停查看明细，单击可固定日期")
+            Text("单击或拖动查看日期明细")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -293,19 +255,17 @@ struct QuotaDailyUsageChart: View {
         return quotaColor.swiftUIColor.opacity(isToday ? 1 : 0.32)
     }
 
-    private func point(
-        at location: CGPoint,
-        proxy: ChartProxy,
-        geometry: GeometryProxy
-    ) -> QuotaDailyUsagePoint? {
-        guard let plotFrame = proxy.plotFrame else { return nil }
-        let plotRect = geometry[plotFrame]
-        guard plotRect.contains(location) else { return nil }
-        let plotX = location.x - plotRect.minX
-        guard let selectedDate: Date = proxy.value(atX: plotX) else { return nil }
-        return QuotaDailyUsageChartSelection.nearestPoint(
-            to: Int64(selectedDate.timeIntervalSince1970.rounded()),
-            in: usablePoints
+    private var selectedDate: Binding<Date?> {
+        Binding(
+            get: { selectedDay.map(date) },
+            set: { selectedDate in
+                selectedDay = selectedDate.flatMap {
+                    QuotaDailyUsageChartSelection.nearestPoint(
+                        to: Int64($0.timeIntervalSince1970.rounded()),
+                        in: usablePoints
+                    )?.dayStart
+                }
+            }
         )
     }
 
