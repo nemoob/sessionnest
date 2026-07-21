@@ -3,8 +3,8 @@ import SwiftUI
 enum DailyTokenUsagePresentation {
     static let chartHeight: CGFloat = 110
     static let barAreaHeight: CGFloat = 62
-    static let emptyText = "暂无每日 Token 记录"
-    static let observationCaption = "按本机可读取的 Codex 会话记录统计，不代表服务端额度消耗"
+    static let emptyText = "暂无每日非缓存 Token 记录"
+    static let observationCaption = "按本机日志估算非缓存 Token，不代表服务端额度消耗"
 
     private static let compactNumberFormat = IntegerFormatStyle<Int64>.number
         .notation(.compactName)
@@ -85,7 +85,7 @@ enum DailyTokenUsagePresentation {
             relativeLabel == "今天" || relativeLabel == "昨天"
             ? "\(relativeLabel)，\(fullDateLabel)"
             : fullDateLabel
-        return "\(dateLabel)，\(exactTokenText(tokens))"
+        return "\(dateLabel)，非缓存 \(exactTokenText(tokens))"
     }
 
     private static func fullDateLabel(_ dayStart: Int64, calendar: Calendar) -> String {
@@ -136,7 +136,7 @@ struct DailyTokenUsageChart: View {
     }
 
     private var maximumObservedTokens: Int64 {
-        usablePoints.map(\.usage.totalTokens).max() ?? 0
+        usablePoints.map { DailyTokenUsagePresentation.nonCachedTokens($0.usage) }.max() ?? 0
     }
 
     var body: some View {
@@ -162,7 +162,7 @@ struct DailyTokenUsageChart: View {
             )
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("每日 Token 消耗")
+        .accessibilityLabel("每日非缓存 Token")
         .accessibilityAction(named: "清除选择") {
             selectedDay = nil
         }
@@ -188,7 +188,9 @@ struct DailyTokenUsageChart: View {
             VStack(spacing: 4) {
                 Text(
                     point.map {
-                        DailyTokenUsagePresentation.compactTokenText($0.usage.totalTokens)
+                        DailyTokenUsagePresentation.compactTokenText(
+                            DailyTokenUsagePresentation.nonCachedTokens($0.usage)
+                        )
                     } ?? "--"
                 )
                 .font(.caption2)
@@ -205,7 +207,9 @@ struct DailyTokenUsageChart: View {
                             .fill(barColor(dayStart: point.dayStart))
                             .frame(
                                 height: DailyTokenUsagePresentation.barHeight(
-                                    tokens: point.usage.totalTokens,
+                                    tokens: DailyTokenUsagePresentation.nonCachedTokens(
+                                        point.usage
+                                    ),
                                     maximum: maximumObservedTokens
                                 )
                             )
@@ -231,38 +235,55 @@ struct DailyTokenUsageChart: View {
             point.map {
                 DailyTokenUsagePresentation.accessibilityLabel(
                     dayStart: dayStart,
-                    tokens: $0.usage.totalTokens,
+                    tokens: DailyTokenUsagePresentation.nonCachedTokens($0.usage),
                     now: now,
                     calendar: calendar
                 )
             }
-                ?? "\(DailyTokenUsagePresentation.weekdayLabel(dayStart, calendar: calendar))，无本地 Token 记录"
+                ?? "\(DailyTokenUsagePresentation.weekdayLabel(dayStart, calendar: calendar))，无本地非缓存 Token 记录"
         )
     }
 
     @ViewBuilder
     private var detail: some View {
         if let selectedPoint {
-            HStack(spacing: 8) {
-                Text(
-                    DailyTokenUsagePresentation.dayLabel(
-                        selectedPoint.dayStart,
-                        now: now,
-                        calendar: calendar
+            let nonCachedText = DailyTokenUsagePresentation.exactTokenText(
+                DailyTokenUsagePresentation.nonCachedTokens(selectedPoint.usage)
+            )
+            let totalText = DailyTokenUsagePresentation.exactTokenText(
+                selectedPoint.usage.totalTokens
+            )
+            let cachedText = DailyTokenUsagePresentation.exactTokenText(
+                selectedPoint.usage.cachedInputTokens
+            )
+            let cachePercentage = DailyTokenUsagePresentation.cachePercentageText(
+                selectedPoint.usage
+            )
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(
+                        DailyTokenUsagePresentation.dayLabel(
+                            selectedPoint.dayStart,
+                            now: now,
+                            calendar: calendar
+                        )
                     )
-                )
-                .fontWeight(.semibold)
-                Spacer()
-                Text(
-                    DailyTokenUsagePresentation.exactTokenText(
-                        selectedPoint.usage.totalTokens
-                    )
-                )
-                .monospacedDigit()
+                    .fontWeight(.semibold)
+                    Spacer()
+                    Text("非缓存 \(nonCachedText)")
+                        .monospacedDigit()
+                }
+                HStack(spacing: 8) {
+                    Text("总计 \(totalText)")
+                    Spacer()
+                    Text("缓存 \(cachedText) · \(cachePercentage)")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
             .font(.caption)
         } else {
-            Text("单击柱条查看当日 Token")
+            Text("单击柱条查看非缓存、总计和缓存占比")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

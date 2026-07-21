@@ -184,10 +184,10 @@ import Testing
 
     #expect(current.snapshot == cycle)
     #expect(current.title == "统计概览 · 本额度周期")
-    #expect(current.dailyTokenTitle == "本周期每日 Token")
+    #expect(current.dailyTokenTitle == "本周期每日非缓存 Token")
     #expect(missing.snapshot == fallback)
     #expect(missing.title == "统计概览 · 最近 7 天")
-    #expect(missing.dailyTokenTitle == "最近 7 天每日 Token")
+    #expect(missing.dailyTokenTitle == "最近 7 天每日非缓存 Token")
 }
 
 @Test func compactStatusLayoutFitsOneHundredPercentQuota() {

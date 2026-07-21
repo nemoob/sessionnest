@@ -472,10 +472,10 @@ import Testing
 @Test func dailyTokenUsagePresentationFormatsCompactAndExactTokens() {
     #expect(DailyTokenUsagePresentation.compactTokenText(10_000) == "1万")
     #expect(DailyTokenUsagePresentation.exactTokenText(12_345) == "12,345 Token")
-    #expect(DailyTokenUsagePresentation.emptyText == "暂无每日 Token 记录")
+    #expect(DailyTokenUsagePresentation.emptyText == "暂无每日非缓存 Token 记录")
     #expect(
         DailyTokenUsagePresentation.observationCaption
-            == "按本机可读取的 Codex 会话记录统计，不代表服务端额度消耗"
+            == "按本机日志估算非缓存 Token，不代表服务端额度消耗"
     )
 }
 
@@ -526,7 +526,7 @@ import Testing
             tokens: 12_345,
             now: now,
             calendar: calendar
-        ) == "今天，2026年7月21日，12,345 Token"
+        ) == "今天，2026年7月21日，非缓存 12,345 Token"
     )
     #expect(
         DailyTokenUsagePresentation.accessibilityLabel(
@@ -534,7 +534,7 @@ import Testing
             tokens: 8_765,
             now: now,
             calendar: calendar
-        ) == "2026年7月19日，8,765 Token"
+        ) == "2026年7月19日，非缓存 8,765 Token"
     )
 }
 
