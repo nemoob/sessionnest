@@ -5,6 +5,62 @@ import Testing
 
 @Suite("ThreadTokenUsageTests")
 struct ThreadTokenUsageTests {
+    @Test func subagentScanExcludesForkedParentHistory() throws {
+        let lines = [
+            #"{"timestamp":"2026-07-20T06:12:34.472Z","type":"session_meta","payload":{"id":"019f7e27-a0fa-7f33-a653-c4318fa5dd48","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}"#,
+            #"{"timestamp":"2026-07-20T06:12:34.472Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":400,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":500}}}}"#,
+            #"{"timestamp":"2026-07-20T06:12:34.805Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019f7e26-8eb1-74f1-a607-c0c7ca678fd3"}}"#,
+            #"{"timestamp":"2026-07-20T06:12:34.805Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":520,"cached_input_tokens":410,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":520}}}}"#,
+            #"{"timestamp":"2026-07-20T06:12:34.855Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019f7e27-a3a5-7143-bf0a-055beb48d8f9"}}"#,
+            #"{"timestamp":"2026-07-20T06:13:00.996Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":580,"cached_input_tokens":450,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":580}}}}"#,
+        ]
+        let url = try fixture(data: Data((lines.joined(separator: "\n") + "\n").utf8))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try RolloutTokenScanner.scan(url: url, calendar: localCalendar)
+
+        #expect(result.maximum == usage(580, 450, 0, 0, 580))
+        #expect(result.dailyUsage.values.reduce(.zero, +) == usage(60, 40, 0, 0, 60))
+    }
+
+    @Test func discoversSubagentRolloutAndAttributesItToVisibleParent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TokenDiscoveryTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let parentURL = root.appendingPathComponent("parent.jsonl")
+        let childURL = root.appendingPathComponent("child.jsonl")
+        try Data().write(to: parentURL)
+        try Data(
+            #"{"timestamp":"2026-07-20T00:00:00Z","type":"session_meta","payload":{"id":"child","cwd":"/work/project","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}}}"#
+                .utf8
+        ).write(to: childURL)
+        let parent = CodexThread(
+            id: "parent",
+            name: "Parent",
+            preview: "",
+            cwd: "/work/project",
+            createdAt: 1,
+            updatedAt: 2,
+            recencyAt: nil,
+            gitInfo: nil,
+            path: parentURL.path
+        )
+
+        let targets = LocalTokenScanTargetDiscovery.discover(
+            threads: [parent],
+            roots: [root]
+        )
+
+        #expect(targets.map(\.id).sorted() == ["child", "parent"])
+        #expect(targets.first { $0.id == "child" }?.attributionThreadID == "parent")
+        #expect(
+            targets.first { $0.id == "child" }?.url.resolvingSymlinksInPath()
+                == childURL.resolvingSymlinksInPath()
+        )
+    }
+
     @Test func scanStopsWhenCancellationIsRequested() throws {
         let file = try fixture(data: Data("ignored\n".utf8))
         defer { try? FileManager.default.removeItem(at: file) }

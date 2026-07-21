@@ -12,6 +12,7 @@ typealias TokenScanOperation =
 typealias ThreadReloadOperation = @Sendable () async throws -> ([CodexThread], [CodexThread])
 typealias RateLimitRefreshOperation = @Sendable () async throws -> CodexRateLimitSnapshot
 typealias UsageRefreshOperation = @Sendable () async throws -> CodexUsageSnapshot
+typealias TokenScanTargetDiscoveryOperation = @Sendable ([CodexThread]) async -> [TokenScanTarget]
 
 enum SidebarSelection: Hashable {
     case quota
@@ -206,12 +207,31 @@ enum ThreadTokenCoverage {
         parserVersion: Int64,
         fileManager: FileManager = .default
     ) -> Set<String> {
+        validTargetIDs(
+            targets: threads.compactMap { thread in
+                guard let path = thread.path else { return nil }
+                return TokenScanTarget(
+                    id: thread.id,
+                    attributionThreadID: thread.id,
+                    url: URL(fileURLWithPath: path)
+                )
+            },
+            cache: cache,
+            parserVersion: parserVersion,
+            fileManager: fileManager
+        )
+    }
+
+    static func validTargetIDs(
+        targets: [TokenScanTarget],
+        cache: [String: ThreadTokenCache],
+        parserVersion: Int64,
+        fileManager: FileManager = .default
+    ) -> Set<String> {
         Set(
-            threads.compactMap { thread in
-                guard let cached = cache[thread.id],
-                    let path = thread.path
-                else { return nil }
-                let url = URL(fileURLWithPath: path)
+            targets.compactMap { target in
+                guard let cached = cache[target.id] else { return nil }
+                let url = target.url
                 guard url.pathExtension.lowercased() == "jsonl",
                     fileManager.isReadableFile(atPath: url.path),
                     let attributes = try? fileManager.attributesOfItem(atPath: url.path),
@@ -232,7 +252,7 @@ enum ThreadTokenCoverage {
                     cachedModificationTime: cached.fileModificationTimeNS,
                     cachedParserVersion: cached.parserVersion
                 )
-                return decision == .rebuild ? nil : thread.id
+                return decision == .rebuild ? nil : target.id
             })
     }
 }
@@ -396,6 +416,7 @@ final class SessionListModel: ObservableObject {
     @Published var threadTokenCache: [String: ThreadTokenCache] = [:]
     @Published var threadTokenDailyUsage: [ThreadTokenDailyUsage] = []
     @Published private(set) var tokenCoveredThreadIDs: Set<String> = []
+    @Published private(set) var tokenAttributionThreadIDs: [String: String] = [:]
     @Published private(set) var rateLimitSnapshot: CodexRateLimitSnapshot?
     @Published private(set) var resetCreditsSnapshot: CodexRateLimitResetCreditsSummary?
     @Published private(set) var accountSnapshot: CodexAccountSnapshot?
@@ -418,6 +439,7 @@ final class SessionListModel: ObservableObject {
     let store: MetadataStore
     private let usageRefreshOperation: UsageRefreshOperation
     private let tokenScanOperation: TokenScanOperation
+    private let tokenScanTargetDiscoveryOperation: TokenScanTargetDiscoveryOperation
     private let threadReloadOperation: ThreadReloadOperation?
     private var stateRevision = SessionStateRevision()
     private var classificationTask: Task<Void, Never>?
@@ -429,7 +451,7 @@ final class SessionListModel: ObservableObject {
     private var reloadTask: Task<Void, Never>?
     private var rateLimitRefreshTask: Task<Void, Never>?
 
-    private static let tokenParserVersion: Int64 = 2
+    private static let tokenParserVersion: Int64 = 3
     static let automaticRefreshInterval: TimeInterval = 15 * 60
 
     var totalSessionCount: Int {
@@ -474,6 +496,7 @@ final class SessionListModel: ObservableObject {
             dailyUsage: threadTokenDailyUsage,
             threadProjects: threadProjects,
             projectIdentityIndex: projectIdentityIndex,
+            usageAttributionThreadIDs: tokenAttributionThreadIDs,
             timeFilter: timeFilter,
             calendar: .current,
             now: Int64(Date().timeIntervalSince1970)
@@ -493,6 +516,7 @@ final class SessionListModel: ObservableObject {
                 calendar: calendar
             )
         },
+        tokenScanTargetDiscoveryOperation: TokenScanTargetDiscoveryOperation? = nil,
         threadReloadOperation: ThreadReloadOperation? = nil
     ) {
         self.client = client
@@ -510,6 +534,12 @@ final class SessionListModel: ObservableObject {
             self.usageRefreshOperation = { try await client.readUsageSnapshot() }
         }
         self.tokenScanOperation = tokenScanOperation
+        self.tokenScanTargetDiscoveryOperation =
+            tokenScanTargetDiscoveryOperation ?? { threads in
+                await Task.detached(priority: .utility) {
+                    LocalTokenScanTargetDiscovery.discover(threads: threads)
+                }.value
+            }
         self.threadReloadOperation = threadReloadOperation
     }
 
@@ -579,6 +609,9 @@ final class SessionListModel: ObservableObject {
                 threads: result.0.0 + result.0.1,
                 cache: result.6,
                 parserVersion: Self.tokenParserVersion
+            )
+            tokenAttributionThreadIDs = Dictionary(
+                uniqueKeysWithValues: allThreads.map { ($0.id, $0.id) }
             )
             rateLimitSnapshot = usageSnapshot?.rateLimits
             resetCreditsSnapshot = usageSnapshot?.resetCredits
@@ -916,6 +949,8 @@ final class SessionListModel: ObservableObject {
         await previousTask?.value
         guard replacementRequest == tokenScanReplacementRequest else { return }
 
+        let targets = await tokenScanTargetDiscoveryOperation(threads)
+        guard replacementRequest == tokenScanReplacementRequest else { return }
         let cached = (try? await store.loadThreadTokenCache()) ?? threadTokenCache
         tokenScanGeneration += 1
         let generation = tokenScanGeneration
@@ -923,17 +958,25 @@ final class SessionListModel: ObservableObject {
         let calendar = Calendar.current
         let operation = tokenScanOperation
 
+        tokenAttributionThreadIDs = Dictionary(
+            uniqueKeysWithValues: targets.map { ($0.id, $0.attributionThreadID) }
+        )
+        tokenCoveredThreadIDs = ThreadTokenCoverage.validTargetIDs(
+            targets: targets,
+            cache: cached,
+            parserVersion: parserVersion
+        )
+
         isScanningTokenUsage = true
         tokenScanTask = Task.detached(priority: .utility) { [weak self, store] in
-            for thread in threads {
+            for target in targets {
                 guard !Task.isCancelled,
                     await self?.acceptsTokenScan(
                         generation,
                         replacementRequest: replacementRequest
                     ) == true
                 else { return }
-                guard let path = thread.path else { continue }
-                let url = URL(fileURLWithPath: path)
+                let url = target.url
                 guard url.pathExtension.lowercased() == "jsonl",
                     FileManager.default.isReadableFile(atPath: url.path)
                 else { continue }
@@ -949,7 +992,7 @@ final class SessionListModel: ObservableObject {
                     let modificationTimeNS = Int64(
                         (modificationDate.timeIntervalSince1970 * 1_000_000_000).rounded()
                     )
-                    let previous = cached[thread.id]
+                    let previous = cached[target.id]
                     var decision =
                         previous.map {
                             TokenCacheDecision.decide(
@@ -998,7 +1041,7 @@ final class SessionListModel: ObservableObject {
                         ) == true
                     else { return }
                     try await store.saveThreadTokenScan(
-                        threadID: thread.id,
+                        threadID: target.id,
                         rolloutPath: url.path,
                         fileSize: size,
                         fileModificationTimeNS: modificationTimeNS,
@@ -1025,6 +1068,7 @@ final class SessionListModel: ObservableObject {
                 await self?.publishTokenUsage(
                     cache: result.0,
                     dailyUsage: result.1,
+                    targets: targets,
                     generation: generation,
                     replacementRequest: replacementRequest
                 )
@@ -1045,14 +1089,18 @@ final class SessionListModel: ObservableObject {
     private func publishTokenUsage(
         cache: [String: ThreadTokenCache],
         dailyUsage: [ThreadTokenDailyUsage],
+        targets: [TokenScanTarget],
         generation: Int,
         replacementRequest: Int
     ) async {
         guard acceptsTokenScan(generation, replacementRequest: replacementRequest) else { return }
         threadTokenCache = cache
         threadTokenDailyUsage = dailyUsage
-        tokenCoveredThreadIDs = ThreadTokenCoverage.validThreadIDs(
-            threads: activeThreads + archivedThreads,
+        tokenAttributionThreadIDs = Dictionary(
+            uniqueKeysWithValues: targets.map { ($0.id, $0.attributionThreadID) }
+        )
+        tokenCoveredThreadIDs = ThreadTokenCoverage.validTargetIDs(
+            targets: targets,
             cache: cache,
             parserVersion: Self.tokenParserVersion
         )
@@ -1085,6 +1133,7 @@ final class SessionListModel: ObservableObject {
                 timedUsage: timedUsage,
                 threadProjects: threadProjects,
                 projectIdentityIndex: projectIdentityIndex,
+                usageAttributionThreadIDs: tokenAttributionThreadIDs,
                 startingAt: start,
                 calendar: calendar,
                 now: now
