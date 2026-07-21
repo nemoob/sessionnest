@@ -44,6 +44,22 @@ import Testing
 }
 
 @MainActor
+@Test func successfulScreenshotReplacesTheExistingClipboard() throws {
+    let pasteboard = NSPasteboard(name: .init("SessionNestScreenshotTests.replacement"))
+    pasteboard.clearContents()
+    pasteboard.setString("旧内容", forType: .string)
+
+    try StatusPopoverScreenshotCopier().copy(
+        content: Color.green.frame(width: 120, height: 80),
+        scale: 1,
+        pasteboard: pasteboard
+    )
+
+    #expect(pasteboard.data(forType: .png) != nil)
+    #expect(pasteboard.string(forType: .string) == nil)
+}
+
+@MainActor
 @Test func screenshotProgressBarRendersWithoutAnAppKitProgressView() throws {
     let pasteboard = NSPasteboard(name: .init("SessionNestScreenshotTests.progress"))
     pasteboard.clearContents()

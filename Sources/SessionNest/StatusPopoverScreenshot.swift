@@ -27,6 +27,7 @@ struct StatusPopoverScreenshotCopier {
         guard item.setData(pngData, forType: .png) else {
             throw StatusPopoverScreenshotError.pasteboardWriteFailed
         }
+        pasteboard.clearContents()
         guard pasteboard.writeObjects([item]) else {
             throw StatusPopoverScreenshotError.pasteboardWriteFailed
         }
