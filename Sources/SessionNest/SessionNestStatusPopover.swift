@@ -602,13 +602,15 @@ struct SessionNestStatusPopover: View {
     }
 
     private var screenshotOverview: some View {
-        overviewContent(includesScreenshotAction: false)
+        let theme = AppTheme(storedValue: storedTheme)
+
+        return overviewContent(includesScreenshotAction: false)
             .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
             .padding(16)
             .frame(width: SessionNestStatusPopoverLayout.width)
             .fixedSize(horizontal: false, vertical: true)
-            .background(Color(nsColor: .windowBackgroundColor))
-            .preferredColorScheme(AppTheme(storedValue: storedTheme).colorScheme)
+            .background(StatusPopoverScreenshotBackground.color(for: theme))
+            .preferredColorScheme(theme.colorScheme)
     }
 
     @MainActor

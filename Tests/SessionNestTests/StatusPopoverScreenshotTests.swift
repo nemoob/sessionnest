@@ -77,3 +77,22 @@ import Testing
     #expect(image.pixelsWide == 200)
     #expect(image.pixelsHigh > 0)
 }
+
+@MainActor
+@Test func darkScreenshotBackgroundDoesNotResolveThroughTheSystemAppearance() throws {
+    let pasteboard = NSPasteboard(name: .init("SessionNestScreenshotTests.darkBackground"))
+    let content = StatusPopoverScreenshotBackground.color(for: .dark)
+        .frame(width: 40, height: 40)
+        .preferredColorScheme(.dark)
+
+    try StatusPopoverScreenshotCopier().copy(
+        content: content,
+        scale: 1,
+        pasteboard: pasteboard
+    )
+
+    let data = try #require(pasteboard.data(forType: .png))
+    let image = try #require(NSBitmapImageRep(data: data))
+    let centerColor = try #require(image.colorAt(x: 20, y: 20)?.usingColorSpace(.deviceRGB))
+    #expect(centerColor.brightnessComponent < 0.5)
+}

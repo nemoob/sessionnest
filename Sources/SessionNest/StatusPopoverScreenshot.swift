@@ -7,6 +7,31 @@ enum StatusPopoverScreenshotError: Error {
     case pasteboardWriteFailed
 }
 
+enum StatusPopoverScreenshotBackground {
+    static func color(for theme: AppTheme) -> Color {
+        let appearanceName: NSAppearance.Name?
+        switch theme {
+        case .system:
+            appearanceName = nil
+        case .light:
+            appearanceName = .aqua
+        case .dark:
+            appearanceName = .darkAqua
+        }
+
+        guard let appearanceName, let appearance = NSAppearance(named: appearanceName) else {
+            return Color(nsColor: .windowBackgroundColor)
+        }
+        var backgroundColor = NSColor.windowBackgroundColor
+        appearance.performAsCurrentDrawingAppearance {
+            backgroundColor =
+                NSColor.windowBackgroundColor.usingColorSpace(.deviceRGB)
+                ?? NSColor.windowBackgroundColor
+        }
+        return Color(nsColor: backgroundColor)
+    }
+}
+
 @MainActor
 struct StatusPopoverScreenshotCopier {
     func copy<Content: View>(
