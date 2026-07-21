@@ -440,7 +440,7 @@ import Testing
     #expect(status.weeklyQuota.resetAtText == "重置时间 --")
 }
 
-@Test func quotaDailyUsagePresentationBuildsOrderedSevenDayDomain() {
+@Test func dailyTokenUsagePresentationBuildsOrderedSevenDayDomain() {
     let calendar = quotaChartCalendar()
     let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
     let expected = (15...21).map {
@@ -448,11 +448,11 @@ import Testing
     }
 
     #expect(
-        QuotaDailyUsagePresentation.dayDomain(now: now, calendar: calendar) == expected
+        DailyTokenUsagePresentation.dayDomain(now: now, calendar: calendar) == expected
     )
 }
 
-@Test func quotaDailyUsagePresentationFormatsChineseDayLabels() {
+@Test func dailyTokenUsagePresentationFormatsChineseDayLabels() {
     let calendar = quotaChartCalendar()
     let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
     let today = quotaChartTimestamp(2026, 7, 21, calendar: calendar)
@@ -460,100 +460,68 @@ import Testing
     let monday = quotaChartTimestamp(2026, 7, 20, calendar: calendar)
 
     #expect(
-        QuotaDailyUsagePresentation.dayLabel(today, now: now, calendar: calendar) == "今天"
+        DailyTokenUsagePresentation.dayLabel(today, now: now, calendar: calendar) == "今天"
     )
     #expect(
-        QuotaDailyUsagePresentation.dayLabel(yesterday, now: now, calendar: calendar)
+        DailyTokenUsagePresentation.dayLabel(yesterday, now: now, calendar: calendar)
             == "昨天"
     )
-    #expect(QuotaDailyUsagePresentation.weekdayLabel(monday, calendar: calendar) == "周一")
+    #expect(DailyTokenUsagePresentation.weekdayLabel(monday, calendar: calendar) == "周一")
 }
 
-@Test func quotaDailyUsagePresentationFormatsPercentagesWithoutInventingUnknownValues() {
-    #expect(QuotaDailyUsagePresentation.percentage(3.24) == "3.2%")
-    #expect(QuotaDailyUsagePresentation.percentage(3) == "3%")
-    #expect(QuotaDailyUsagePresentation.percentage(nil) == "--")
-    #expect(QuotaDailyUsagePresentation.emptyText == "从现在开始记录每日额度变化")
+@Test func dailyTokenUsagePresentationFormatsCompactAndExactTokens() {
+    #expect(DailyTokenUsagePresentation.compactTokenText(10_000) == "1万")
+    #expect(DailyTokenUsagePresentation.exactTokenText(12_345) == "12,345 Token")
+    #expect(DailyTokenUsagePresentation.emptyText == "暂无每日 Token 记录")
     #expect(
-        QuotaDailyUsagePresentation.observationCaption
-            == "仅统计本地观察到的 Codex 额度快照，无法回溯此前用量"
+        DailyTokenUsagePresentation.observationCaption
+            == "按本机可读取的 Codex 会话记录统计，不代表服务端额度消耗"
     )
 }
 
-@Test func quotaDailyUsagePresentationMatchesTokensWithoutUsingZeroForMissingData() {
-    let known = StatisticsDailyPoint(
-        dayStart: 200,
-        usage: TokenUsageBreakdown(
-            inputTokens: 8_000,
-            cachedInputTokens: 3_000,
-            outputTokens: 1_000,
-            reasoningOutputTokens: 500,
-            totalTokens: 10_000
-        )
-    )
-
-    #expect(
-        QuotaDailyUsagePresentation.tokenText(for: 200, in: [known]) == "1万 Token"
-    )
-    #expect(QuotaDailyUsagePresentation.tokenText(for: 300, in: [known]) == nil)
-}
-
-@Test func quotaDailyUsageSelectionClampsOutsideRangeAndChoosesEarlierTie() {
+@Test func dailyTokenUsageSelectionReconcilesSelectedPoint() {
     let points = [
-        QuotaDailyUsagePoint(dayStart: 100, usedPercent: 1),
-        QuotaDailyUsagePoint(dayStart: 200, usedPercent: 2),
-        QuotaDailyUsagePoint(dayStart: 300, usedPercent: 3),
+        dailyTokenPoint(dayStart: 100, totalTokens: 1),
+        dailyTokenPoint(dayStart: 200, totalTokens: 2),
     ]
 
-    #expect(QuotaDailyUsageChartSelection.nearestPoint(to: 10, in: points)?.dayStart == 100)
-    #expect(QuotaDailyUsageChartSelection.nearestPoint(to: 390, in: points)?.dayStart == 300)
-    #expect(QuotaDailyUsageChartSelection.nearestPoint(to: 150, in: points)?.dayStart == 100)
-    #expect(QuotaDailyUsageChartSelection.nearestPoint(to: 151, in: points)?.dayStart == 200)
+    #expect(DailyTokenUsageSelection.reconcile(selectedDay: nil, in: points) == nil)
+    #expect(DailyTokenUsageSelection.reconcile(selectedDay: 100, in: points) == 100)
+    #expect(DailyTokenUsageSelection.reconcile(selectedDay: 300, in: points) == nil)
 }
 
-@Test func quotaDailyUsageSelectionReconcilesSelectedPoint() {
-    let points = [
-        QuotaDailyUsagePoint(dayStart: 100, usedPercent: 1),
-        QuotaDailyUsagePoint(dayStart: 200, usedPercent: 2),
-    ]
-
-    #expect(QuotaDailyUsageChartSelection.reconcile(selectedDay: nil, in: points) == nil)
-    #expect(QuotaDailyUsageChartSelection.reconcile(selectedDay: 100, in: points) == 100)
-    #expect(QuotaDailyUsageChartSelection.reconcile(selectedDay: 300, in: points) == nil)
-}
-
-@Test func quotaDailyUsageChartKeepsCompactHeightAndReadableAccessibility() {
+@Test func dailyTokenUsageChartKeepsCompactHeightAndReadableAccessibility() {
     let calendar = quotaChartCalendar()
     let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
     let today = quotaChartTimestamp(2026, 7, 21, calendar: calendar)
     let earlierDay = quotaChartTimestamp(2026, 7, 19, calendar: calendar)
 
-    #expect(QuotaDailyUsagePresentation.chartHeight == 110)
+    #expect(DailyTokenUsagePresentation.chartHeight == 110)
     #expect(
-        QuotaDailyUsagePresentation.accessibilityLabel(
+        DailyTokenUsagePresentation.accessibilityLabel(
             dayStart: today,
-            usedPercent: 3.24,
+            tokens: 12_345,
             now: now,
             calendar: calendar
-        ) == "今天，2026年7月21日，消耗 3.2%"
+        ) == "今天，2026年7月21日，12,345 Token"
     )
     #expect(
-        QuotaDailyUsagePresentation.accessibilityLabel(
+        DailyTokenUsagePresentation.accessibilityLabel(
             dayStart: earlierDay,
-            usedPercent: 1,
+            tokens: 8_765,
             now: now,
             calendar: calendar
-        ) == "2026年7月19日，消耗 1%"
+        ) == "2026年7月19日，8,765 Token"
     )
 }
 
-@Test func quotaDailyUsageChartScalesPlainSwiftUIBarsWithoutInventingUsage() {
-    #expect(QuotaDailyUsagePresentation.barHeight(usedPercent: 0, maximum: 10) == 0)
-    #expect(QuotaDailyUsagePresentation.barHeight(usedPercent: .nan, maximum: 10) == 0)
-    #expect(QuotaDailyUsagePresentation.barHeight(usedPercent: 2, maximum: 10) == 12.4)
+@Test func dailyTokenUsageChartScalesPlainSwiftUIBarsWithoutInventingUsage() {
+    #expect(DailyTokenUsagePresentation.barHeight(tokens: 0, maximum: 10) == 0)
+    #expect(DailyTokenUsagePresentation.barHeight(tokens: 2, maximum: 0) == 0)
+    #expect(DailyTokenUsagePresentation.barHeight(tokens: 2, maximum: 10) == 12.4)
     #expect(
-        QuotaDailyUsagePresentation.barHeight(usedPercent: 20, maximum: 10)
-            == QuotaDailyUsagePresentation.barAreaHeight
+        DailyTokenUsagePresentation.barHeight(tokens: 20, maximum: 10)
+            == DailyTokenUsagePresentation.barAreaHeight
     )
 }
 
@@ -613,6 +581,19 @@ private func resetCredit(
         expiresAt: expiresAt,
         title: "Full reset",
         description: "Granted"
+    )
+}
+
+private func dailyTokenPoint(dayStart: Int64, totalTokens: Int64) -> StatisticsDailyPoint {
+    StatisticsDailyPoint(
+        dayStart: dayStart,
+        usage: TokenUsageBreakdown(
+            inputTokens: totalTokens,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: totalTokens
+        )
     )
 }
 

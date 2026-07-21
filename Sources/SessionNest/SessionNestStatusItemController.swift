@@ -57,15 +57,24 @@ enum SessionNestQuotaRefreshSchedule {
 struct StatusPopoverStatisticsScope {
     let snapshot: StatisticsSnapshot
     let title: String
+    let dailyTokenTitle: String
 
     static func resolve(
         cycleSnapshot: StatisticsSnapshot?,
         fallbackSnapshot: @autoclosure () -> StatisticsSnapshot
     ) -> Self {
         if let cycleSnapshot {
-            return Self(snapshot: cycleSnapshot, title: "统计概览 · 本额度周期")
+            return Self(
+                snapshot: cycleSnapshot,
+                title: "统计概览 · 本额度周期",
+                dailyTokenTitle: "本周期每日 Token"
+            )
         }
-        return Self(snapshot: fallbackSnapshot(), title: "统计概览 · 最近 7 天")
+        return Self(
+            snapshot: fallbackSnapshot(),
+            title: "统计概览 · 最近 7 天",
+            dailyTokenTitle: "最近 7 天每日 Token"
+        )
     }
 }
 

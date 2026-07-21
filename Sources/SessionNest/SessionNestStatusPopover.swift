@@ -429,14 +429,12 @@ struct SessionNestStatusPopover: View {
                 Text("配额")
                     .font(.subheadline.weight(.semibold))
                 quotaRow(title: "每周", quota: status.weeklyQuota)
-                Text("本周期每日消耗")
+                Text(statisticsScope.dailyTokenTitle)
                     .font(.subheadline.weight(.semibold))
-                QuotaDailyUsageChart(
-                    points: model.quotaDailyUsagePoints,
-                    statisticsDailyPoints: statistics.dailyPoints,
+                DailyTokenUsageChart(
+                    points: statistics.dailyPoints,
                     now: now,
-                    calendar: calendar,
-                    quotaColor: status.weeklyQuota.color
+                    calendar: calendar
                 )
                 resetCreditsRow(resetCredits)
 

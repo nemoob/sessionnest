@@ -1,10 +1,16 @@
 import SwiftUI
 
-enum QuotaDailyUsagePresentation {
+enum DailyTokenUsagePresentation {
     static let chartHeight: CGFloat = 110
     static let barAreaHeight: CGFloat = 62
-    static let emptyText = "从现在开始记录每日额度变化"
-    static let observationCaption = "仅统计本地观察到的 Codex 额度快照，无法回溯此前用量"
+    static let emptyText = "暂无每日 Token 记录"
+    static let observationCaption = "按本机可读取的 Codex 会话记录统计，不代表服务端额度消耗"
+
+    private static let compactNumberFormat = IntegerFormatStyle<Int64>.number
+        .notation(.compactName)
+        .locale(Locale(identifier: "zh-Hans-CN"))
+    private static let exactNumberFormat = IntegerFormatStyle<Int64>.number
+        .locale(Locale(identifier: "zh-Hans-CN"))
 
     static func dayDomain(now: Int64, calendar: Calendar) -> [Int64] {
         let today = calendar.startOfDay(
@@ -41,39 +47,22 @@ enum QuotaDailyUsagePresentation {
         return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][weekday - 1]
     }
 
-    static func percentage(_ value: Double?) -> String {
-        guard let value, value.isFinite else { return "--" }
-        return value.formatted(
-            .number.precision(.fractionLength(0...1)).locale(Locale(identifier: "zh-Hans-CN"))
-        ) + "%"
+    static func compactTokenText(_ tokens: Int64) -> String {
+        max(0, tokens).formatted(compactNumberFormat)
     }
 
-    static func barHeight(usedPercent: Double, maximum: Double) -> CGFloat {
-        guard
-            usedPercent.isFinite,
-            usedPercent > 0,
-            maximum.isFinite,
-            maximum > 0
-        else { return 0 }
-
-        return max(3, barAreaHeight * min(usedPercent / maximum, 1))
+    static func exactTokenText(_ tokens: Int64) -> String {
+        "\(max(0, tokens).formatted(exactNumberFormat)) Token"
     }
 
-    static func tokenText(
-        for dayStart: Int64,
-        in points: [StatisticsDailyPoint]
-    ) -> String? {
-        points.first { $0.dayStart == dayStart }.map {
-            let value = $0.usage.totalTokens.formatted(
-                .number.notation(.compactName).locale(Locale(identifier: "zh-Hans-CN"))
-            )
-            return "\(value) Token"
-        }
+    static func barHeight(tokens: Int64, maximum: Int64) -> CGFloat {
+        guard tokens > 0, maximum > 0 else { return 0 }
+        return max(3, barAreaHeight * min(CGFloat(tokens) / CGFloat(maximum), 1))
     }
 
     static func accessibilityLabel(
         dayStart: Int64,
-        usedPercent: Double,
+        tokens: Int64,
         now: Int64,
         calendar: Calendar
     ) -> String {
@@ -83,7 +72,7 @@ enum QuotaDailyUsagePresentation {
             relativeLabel == "今天" || relativeLabel == "昨天"
             ? "\(relativeLabel)，\(fullDateLabel)"
             : fullDateLabel
-        return "\(dateLabel)，消耗 \(percentage(usedPercent))"
+        return "\(dateLabel)，\(exactTokenText(tokens))"
     }
 
     private static func fullDateLabel(_ dayStart: Int64, calendar: Calendar) -> String {
@@ -95,69 +84,52 @@ enum QuotaDailyUsagePresentation {
     }
 }
 
-enum QuotaDailyUsageChartSelection {
-    static func nearestPoint(
-        to timestamp: Int64,
-        in points: [QuotaDailyUsagePoint]
-    ) -> QuotaDailyUsagePoint? {
-        points.min { lhs, rhs in
-            let leftDistance = abs(lhs.dayStart - timestamp)
-            let rightDistance = abs(rhs.dayStart - timestamp)
-            if leftDistance != rightDistance { return leftDistance < rightDistance }
-            return lhs.dayStart < rhs.dayStart
-        }
-    }
-
+enum DailyTokenUsageSelection {
     static func reconcile(
         selectedDay: Int64?,
-        in points: [QuotaDailyUsagePoint]
+        in points: [StatisticsDailyPoint]
     ) -> Int64? {
         guard let selectedDay else { return nil }
         return points.contains { $0.dayStart == selectedDay } ? selectedDay : nil
     }
 }
 
-struct QuotaDailyUsageChart: View {
-    let points: [QuotaDailyUsagePoint]
-    let statisticsDailyPoints: [StatisticsDailyPoint]
+struct DailyTokenUsageChart: View {
+    let points: [StatisticsDailyPoint]
     let now: Int64
     let calendar: Calendar
-    let quotaColor: MenuBarQuotaColor
 
     @State private var selectedDay: Int64?
 
-    private var selectedPoint: QuotaDailyUsagePoint? {
+    private var selectedPoint: StatisticsDailyPoint? {
         guard let selectedDay else { return nil }
         return usablePoints.first { $0.dayStart == selectedDay }
     }
 
     private var dayDomain: [Int64] {
-        QuotaDailyUsagePresentation.dayDomain(now: now, calendar: calendar)
+        DailyTokenUsagePresentation.dayDomain(now: now, calendar: calendar)
     }
 
-    private var usablePoints: [QuotaDailyUsagePoint] {
+    private var usablePoints: [StatisticsDailyPoint] {
         let visibleDays = Set(dayDomain)
         return
             points
-            .filter {
-                visibleDays.contains($0.dayStart) && $0.usedPercent.isFinite
-                    && $0.usedPercent > 0
-            }
+            .filter { visibleDays.contains($0.dayStart) && $0.usage.totalTokens > 0 }
             .sorted { $0.dayStart < $1.dayStart }
     }
 
-    private var pointsByDay: [Int64: QuotaDailyUsagePoint] {
-        Dictionary(uniqueKeysWithValues: usablePoints.map { ($0.dayStart, $0) })
+    private var pointsByDay: [Int64: StatisticsDailyPoint] {
+        usablePoints.reduce(into: [:]) { $0[$1.dayStart] = $1 }
     }
 
-    private var maximumObservedPercent: Double {
-        max(10, usablePoints.map(\.usedPercent).max() ?? 10)
+    private var maximumObservedTokens: Int64 {
+        usablePoints.map(\.usage.totalTokens).max() ?? 0
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if usablePoints.isEmpty {
-                Text(QuotaDailyUsagePresentation.emptyText)
+                Text(DailyTokenUsagePresentation.emptyText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -165,19 +137,19 @@ struct QuotaDailyUsageChart: View {
                 detail
             }
 
-            Text(QuotaDailyUsagePresentation.observationCaption)
+            Text(DailyTokenUsagePresentation.observationCaption)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .onChange(of: usablePoints.map(\.dayStart)) {
-            selectedDay = QuotaDailyUsageChartSelection.reconcile(
+            selectedDay = DailyTokenUsageSelection.reconcile(
                 selectedDay: selectedDay,
                 in: usablePoints
             )
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("本周期每日消耗")
+        .accessibilityLabel("每日 Token 消耗")
         .accessibilityAction(named: "清除选择") {
             selectedDay = nil
         }
@@ -189,7 +161,7 @@ struct QuotaDailyUsageChart: View {
                 dayBar(dayStart)
             }
         }
-        .frame(height: QuotaDailyUsagePresentation.chartHeight)
+        .frame(height: DailyTokenUsagePresentation.chartHeight)
     }
 
     private func dayBar(_ dayStart: Int64) -> some View {
@@ -201,28 +173,34 @@ struct QuotaDailyUsageChart: View {
             selectedDay = isSelected ? nil : dayStart
         } label: {
             VStack(spacing: 4) {
-                Text(QuotaDailyUsagePresentation.percentage(point?.usedPercent))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .opacity(point == nil ? 0 : 1)
+                Text(
+                    point.map {
+                        DailyTokenUsagePresentation.compactTokenText($0.usage.totalTokens)
+                    } ?? "--"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .opacity(point == nil ? 0 : 1)
 
                 VStack {
                     Spacer(minLength: 0)
                     if let point {
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(barColor(for: point))
+                            .fill(barColor(dayStart: point.dayStart))
                             .frame(
-                                height: QuotaDailyUsagePresentation.barHeight(
-                                    usedPercent: point.usedPercent,
-                                    maximum: maximumObservedPercent
+                                height: DailyTokenUsagePresentation.barHeight(
+                                    tokens: point.usage.totalTokens,
+                                    maximum: maximumObservedTokens
                                 )
                             )
                     }
                 }
-                .frame(height: QuotaDailyUsagePresentation.barAreaHeight)
+                .frame(height: DailyTokenUsagePresentation.barAreaHeight)
 
-                Text(QuotaDailyUsagePresentation.weekdayLabel(dayStart, calendar: calendar))
+                Text(DailyTokenUsagePresentation.weekdayLabel(dayStart, calendar: calendar))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -238,13 +216,14 @@ struct QuotaDailyUsageChart: View {
         .disabled(point == nil)
         .accessibilityLabel(
             point.map {
-                QuotaDailyUsagePresentation.accessibilityLabel(
+                DailyTokenUsagePresentation.accessibilityLabel(
                     dayStart: dayStart,
-                    usedPercent: $0.usedPercent,
+                    tokens: $0.usage.totalTokens,
                     now: now,
                     calendar: calendar
                 )
-            } ?? "\(QuotaDailyUsagePresentation.weekdayLabel(dayStart, calendar: calendar))，无观测数据"
+            }
+                ?? "\(DailyTokenUsagePresentation.weekdayLabel(dayStart, calendar: calendar))，无本地 Token 记录"
         )
     }
 
@@ -253,41 +232,37 @@ struct QuotaDailyUsageChart: View {
         if let selectedPoint {
             HStack(spacing: 8) {
                 Text(
-                    QuotaDailyUsagePresentation.dayLabel(
+                    DailyTokenUsagePresentation.dayLabel(
                         selectedPoint.dayStart,
                         now: now,
                         calendar: calendar
                     )
                 )
                 .fontWeight(.semibold)
-                Text("额度变化 \(QuotaDailyUsagePresentation.percentage(selectedPoint.usedPercent))")
-                    .monospacedDigit()
-                if let tokenText = QuotaDailyUsagePresentation.tokenText(
-                    for: selectedPoint.dayStart,
-                    in: statisticsDailyPoints
-                ) {
-                    Spacer()
-                    Text("本地 \(tokenText)")
-                        .monospacedDigit()
-                }
+                Spacer()
+                Text(
+                    DailyTokenUsagePresentation.exactTokenText(
+                        selectedPoint.usage.totalTokens
+                    )
+                )
+                .monospacedDigit()
             }
             .font(.caption)
         } else {
-            Text("单击柱条查看日期明细")
+            Text("单击柱条查看当日 Token")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
 
-    private func barColor(for point: QuotaDailyUsagePoint) -> Color {
+    private func barColor(dayStart: Int64) -> Color {
         let today = calendar.startOfDay(
             for: Date(timeIntervalSince1970: TimeInterval(now))
         )
         let isToday = calendar.isDate(
-            Date(timeIntervalSince1970: TimeInterval(point.dayStart)),
+            Date(timeIntervalSince1970: TimeInterval(dayStart)),
             inSameDayAs: today
         )
-        return quotaColor.swiftUIColor.opacity(isToday ? 1 : 0.32)
+        return Color.accentColor.opacity(isToday ? 1 : 0.35)
     }
-
 }

@@ -88,149 +88,14 @@ import Testing
 }
 
 @MainActor
-@Test func successfulRateLimitRefreshesPersistAndPublishDailyQuotaUsage() async throws {
-    let fixture = try SessionModelFixture(
-        threadID: "quota-usage-refresh",
-        createRollout: false
-    )
-    defer { fixture.remove() }
-    let firstRefresh = Date(timeIntervalSince1970: 1_784_600_000)
-    let cycleResetsAt = Int64(firstRefresh.timeIntervalSince1970) + 86_400
-    let probe = RateLimitRefreshProbe(
-        snapshots: [
-            try weeklyRateLimitSnapshot(usedPercent: 20, resetsAt: cycleResetsAt),
-            try weeklyRateLimitSnapshot(usedPercent: 27, resetsAt: cycleResetsAt),
-        ]
-    )
-    let model = SessionListModel(
-        client: fixture.client,
-        store: fixture.store,
-        rateLimitRefreshOperation: { try await probe.load() }
-    )
-
-    await model.refreshRateLimits(now: firstRefresh)
-    await model.refreshRateLimits(now: firstRefresh.addingTimeInterval(10 * 60))
-
-    #expect(
-        try await fixture.store.loadQuotaUsageSamples(cycleResetsAt: cycleResetsAt) == [
-            QuotaUsageSample(
-                cycleResetsAt: cycleResetsAt,
-                capturedAt: Int64(firstRefresh.timeIntervalSince1970),
-                usedPercent: 20
-            ),
-            QuotaUsageSample(
-                cycleResetsAt: cycleResetsAt,
-                capturedAt: Int64(firstRefresh.timeIntervalSince1970) + 600,
-                usedPercent: 27
-            ),
-        ]
-    )
-    #expect(model.quotaDailyUsagePoints.count == 1)
-    #expect(model.quotaDailyUsagePoints.first?.usedPercent == 7)
-}
-
-@MainActor
-@Test func rateLimitRefreshWithoutResetTimestampSkipsQuotaUsageHistory() async throws {
-    let fixture = try SessionModelFixture(
-        threadID: "quota-usage-missing-reset",
-        createRollout: false
-    )
-    defer { fixture.remove() }
-    let model = SessionListModel(
-        client: fixture.client,
-        store: fixture.store,
-        rateLimitRefreshOperation: {
-            try weeklyRateLimitSnapshot(usedPercent: 20)
-        }
-    )
-
-    await model.refreshRateLimits(now: Date(timeIntervalSince1970: 1_784_600_000))
-
-    #expect(model.quotaDailyUsagePoints.isEmpty)
-    #expect(try await fixture.store.loadQuotaUsageSamples(cycleResetsAt: 1).isEmpty)
-}
-
-@MainActor
-@Test func failedRateLimitRefreshDoesNotPersistQuotaUsageHistory() async throws {
-    let fixture = try SessionModelFixture(
-        threadID: "quota-usage-failed-refresh",
-        createRollout: false
-    )
-    defer { fixture.remove() }
-    let cycleResetsAt: Int64 = 1_784_686_400
-    let probe = RateLimitRefreshProbe(
-        snapshot: try weeklyRateLimitSnapshot(usedPercent: 20, resetsAt: cycleResetsAt)
-    )
-    await probe.failSubsequentLoads()
-    let model = SessionListModel(
-        client: fixture.client,
-        store: fixture.store,
-        rateLimitRefreshOperation: { try await probe.load() }
-    )
-
-    await model.refreshRateLimits(now: Date(timeIntervalSince1970: 1_784_600_000))
-
-    #expect(try await fixture.store.loadQuotaUsageSamples(cycleResetsAt: cycleResetsAt).isEmpty)
-    #expect(model.quotaDailyUsagePoints.isEmpty)
-}
-
-@MainActor
-@Test func quotaHistoryStorageFailureDoesNotFailSuccessfulRateLimitRefresh() async throws {
-    let fixture = try SessionModelFixture(
-        threadID: "quota-usage-storage-failure",
-        createRollout: false
-    )
-    defer { fixture.remove() }
-    let now = Date(timeIntervalSince1970: 0)
-    let snapshot = try weeklyRateLimitSnapshot(usedPercent: 20, resetsAt: 86_400)
-    let model = SessionListModel(
-        client: fixture.client,
-        store: fixture.store,
-        rateLimitRefreshOperation: { snapshot }
-    )
-
-    await model.refreshRateLimits(now: now)
-
-    #expect(model.rateLimitSnapshot == snapshot)
-    #expect(model.lastSuccessfulUsageRefreshAt == now)
-    #expect(model.usageRefreshErrorMessage == nil)
-    #expect(model.quotaDailyUsagePoints.isEmpty)
-}
-
-@MainActor
-@Test func fullReloadPersistsSuccessfulQuotaUsageSnapshot() async throws {
-    let fixture = try SessionModelFixture(
-        threadID: "quota-usage-full-reload",
-        createRollout: false
-    )
-    defer { fixture.remove() }
-    let cycleResetsAt = Int64(Date().timeIntervalSince1970) + 86_400
-    let model = SessionListModel(
-        client: fixture.client,
-        store: fixture.store,
-        rateLimitRefreshOperation: {
-            try weeklyRateLimitSnapshot(usedPercent: 20, resetsAt: cycleResetsAt)
-        },
-        threadReloadOperation: { ([], []) }
-    )
-
-    await model.reload()
-
-    let samples = try await fixture.store.loadQuotaUsageSamples(cycleResetsAt: cycleResetsAt)
-    #expect(samples.count == 1)
-    #expect(samples.first?.usedPercent == 20)
-}
-
-@MainActor
-@Test func staleFullReloadUsageResponseNeitherPublishesNorPersists() async throws {
+@Test func staleFullReloadUsageResponseDoesNotOverwriteNewerRefresh() async throws {
     let fixture = try SessionModelFixture(
         threadID: "stale-full-reload-usage",
         createRollout: false
     )
     defer { fixture.remove() }
     let now = Date()
-    let capturedAt = Int64(now.timeIntervalSince1970)
-    let cycleResetsAt = capturedAt + 86_400
+    let cycleResetsAt = Int64(now.timeIntervalSince1970) + 86_400
     let staleSnapshot = try weeklyRateLimitSnapshot(
         usedPercent: 80,
         resetsAt: cycleResetsAt
@@ -262,110 +127,10 @@ import Testing
     #expect(model.rateLimitSnapshot == currentSnapshot)
     #expect(model.lastSuccessfulUsageRefreshAt == now)
     #expect(model.activeThreads.map(\.id) == ["from-reload"])
-    #expect(
-        try await fixture.store.loadQuotaUsageSamples(cycleResetsAt: cycleResetsAt) == [
-            QuotaUsageSample(
-                cycleResetsAt: cycleResetsAt,
-                capturedAt: capturedAt,
-                usedPercent: 20
-            )
-        ]
-    )
-}
-
-@MainActor
-@Test func missingResetTimestampClearsPublishedPointsFromPreviousCycle() async throws {
-    let fixture = try SessionModelFixture(
-        threadID: "quota-usage-clear-missing-reset",
-        createRollout: false
-    )
-    defer { fixture.remove() }
-    let firstRefresh = Date(timeIntervalSince1970: 1_784_600_000)
-    let cycleResetsAt = Int64(firstRefresh.timeIntervalSince1970) + 86_400
-    let probe = RateLimitRefreshProbe(
-        snapshots: [
-            try weeklyRateLimitSnapshot(usedPercent: 20, resetsAt: cycleResetsAt),
-            try weeklyRateLimitSnapshot(usedPercent: 27, resetsAt: cycleResetsAt),
-            try weeklyRateLimitSnapshot(usedPercent: 5),
-        ]
-    )
-    let model = SessionListModel(
-        client: fixture.client,
-        store: fixture.store,
-        rateLimitRefreshOperation: { try await probe.load() }
-    )
-
-    await model.refreshRateLimits(now: firstRefresh)
-    await model.refreshRateLimits(now: firstRefresh.addingTimeInterval(600))
-    #expect(model.quotaDailyUsagePoints.first?.usedPercent == 7)
-    await model.refreshRateLimits(now: firstRefresh.addingTimeInterval(1_200))
-
-    #expect(model.quotaDailyUsagePoints.isEmpty)
-}
-
-@MainActor
-@Test func newCycleStorageFailureClearsPublishedPointsFromPreviousCycle() async throws {
-    let fixture = try SessionModelFixture(
-        threadID: "quota-usage-clear-new-cycle-failure",
-        createRollout: false
-    )
-    defer { fixture.remove() }
-    let firstRefresh = Date(timeIntervalSince1970: 1_784_600_000)
-    let oldCycleResetsAt = Int64(firstRefresh.timeIntervalSince1970) + 86_400
-    let newCycleResetsAt: Int64 = 86_400
-    let probe = RateLimitRefreshProbe(
-        snapshots: [
-            try weeklyRateLimitSnapshot(usedPercent: 20, resetsAt: oldCycleResetsAt),
-            try weeklyRateLimitSnapshot(usedPercent: 27, resetsAt: oldCycleResetsAt),
-            try weeklyRateLimitSnapshot(usedPercent: 5, resetsAt: newCycleResetsAt),
-        ]
-    )
-    let model = SessionListModel(
-        client: fixture.client,
-        store: fixture.store,
-        rateLimitRefreshOperation: { try await probe.load() }
-    )
-
-    await model.refreshRateLimits(now: firstRefresh)
-    await model.refreshRateLimits(now: firstRefresh.addingTimeInterval(600))
-    #expect(model.quotaDailyUsagePoints.first?.usedPercent == 7)
-    await model.refreshRateLimits(now: Date(timeIntervalSince1970: 0))
-
-    #expect(model.quotaDailyUsagePoints.isEmpty)
-}
-
-@MainActor
-@Test func sameCycleStorageFailurePreservesPublishedPoints() async throws {
-    let fixture = try SessionModelFixture(
-        threadID: "quota-usage-preserve-same-cycle-failure",
-        createRollout: false
-    )
-    defer { fixture.remove() }
-    let firstRefresh = Date(timeIntervalSince1970: 1_784_600_000)
-    let cycleResetsAt = Int64(firstRefresh.timeIntervalSince1970) + 86_400
-    let probe = RateLimitRefreshProbe(
-        snapshots: [
-            try weeklyRateLimitSnapshot(usedPercent: 20, resetsAt: cycleResetsAt),
-            try weeklyRateLimitSnapshot(usedPercent: 27, resetsAt: cycleResetsAt),
-            try weeklyRateLimitSnapshot(usedPercent: 30, resetsAt: cycleResetsAt),
-        ]
-    )
-    let model = SessionListModel(
-        client: fixture.client,
-        store: fixture.store,
-        rateLimitRefreshOperation: { try await probe.load() }
-    )
-
-    await model.refreshRateLimits(now: firstRefresh)
-    await model.refreshRateLimits(now: firstRefresh.addingTimeInterval(600))
-    #expect(model.quotaDailyUsagePoints.first?.usedPercent == 7)
-    await model.refreshRateLimits(now: Date(timeIntervalSince1970: 0))
-
-    #expect(model.quotaDailyUsagePoints.first?.usedPercent == 7)
 }
 
 @Suite struct SessionNestQuotaRefreshScheduleTests {
-    @Test func quotaHistoryKeepsExistingTimerInterval() {
+    @Test func quotaRefreshKeepsEnergyBalancedInterval() {
         #expect(SessionNestQuotaRefreshSchedule.interval == 10 * 60)
         #expect(SessionNestQuotaRefreshSchedule.tolerance == 60)
     }
@@ -1366,22 +1131,18 @@ private actor DeferredReloadProbe {
 }
 
 private actor RateLimitRefreshProbe {
-    private let snapshots: [CodexRateLimitSnapshot]
+    let snapshot: CodexRateLimitSnapshot
     private(set) var callCount = 0
     private var shouldFail = false
 
     init(snapshot: CodexRateLimitSnapshot) {
-        snapshots = [snapshot]
-    }
-
-    init(snapshots: [CodexRateLimitSnapshot]) {
-        self.snapshots = snapshots
+        self.snapshot = snapshot
     }
 
     func load() throws -> CodexRateLimitSnapshot {
         callCount += 1
         if shouldFail { throw RateLimitRefreshTestError.expectedFailure }
-        return snapshots[min(callCount - 1, snapshots.count - 1)]
+        return snapshot
     }
 
     func failSubsequentLoads() {

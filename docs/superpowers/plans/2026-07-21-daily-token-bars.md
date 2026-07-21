@@ -31,7 +31,7 @@
 - Consumes: `StatisticsDailyPoint`, `TokenUsageBreakdown`, `StatusPopoverStatisticsScope`
 - Produces: `DailyTokenUsagePresentation`, `DailyTokenUsageSelection`, `DailyTokenUsageChart`, and `StatusPopoverStatisticsScope.dailyTokenTitle`
 
-- [ ] **Step 1: Replace percentage expectations with failing Token expectations**
+- [x] **Step 1: Replace percentage expectations with failing Token expectations**
 
 Add tests that require:
 
@@ -61,13 +61,13 @@ Update selection tests to use `[StatisticsDailyPoint]`, and extend the scope tes
 #expect(missing.dailyTokenTitle == "最近 7 天每日 Token")
 ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run: `swift test --filter 'quotaDailyUsage|statusPopoverStatisticsScope'`
 
 Expected: compilation fails because `DailyTokenUsagePresentation` and `dailyTokenTitle` do not exist.
 
-- [ ] **Step 3: Implement the minimal Token presentation and chart**
+- [x] **Step 3: Implement the minimal Token presentation and chart**
 
 Create `DailyTokenUsageChart.swift` by adapting the existing plain SwiftUI seven-day bar view so it:
 
@@ -83,7 +83,7 @@ Filters the fixed seven-day domain, ignores non-positive values, scales bars by 
 
 Add `dailyTokenTitle` to both branches of `StatusPopoverStatisticsScope.resolve`.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run: `swift test --filter 'quotaDailyUsage|statusPopoverStatisticsScope'`
 
@@ -98,7 +98,7 @@ Expected: all selected tests pass.
 - Consumes: `statisticsScope.dailyTokenTitle`, `statistics.dailyPoints`, `DailyTokenUsageChart`
 - Produces: a compact daily Token section immediately below the weekly quota row
 
-- [ ] **Step 1: Update the popover call site**
+- [x] **Step 1: Update the popover call site**
 
 Replace the quota-history section with:
 
@@ -114,7 +114,7 @@ DailyTokenUsageChart(
 
 Keep `quotaRow`, reset credits, statistics cards, and the lower `TokenTrendChart` unchanged.
 
-- [ ] **Step 2: Run the focused UI-model tests**
+- [x] **Step 2: Run the focused UI-model tests**
 
 Run: `swift test --filter 'MenuBarStatusTests|SessionNestStatusItemControllerTests'`
 
@@ -134,15 +134,15 @@ Expected: all selected tests pass.
 - Preserves: `beginUsageRefresh()`, `acceptsUsageRefresh(_:)`, `refreshQuotaCycleStatistics(acceptingUsageGeneration:)`
 - Removes: `QuotaUsageSample`, `QuotaDailyUsagePoint`, quota sample store methods/schema, `quotaDailyUsagePoints`, `quotaDailyUsageCycleResetsAt`, and `recordQuotaUsage`
 
-- [ ] **Step 1: Remove obsolete test expectations**
+- [x] **Step 1: Remove obsolete test expectations**
 
 Delete tests dedicated only to quota snapshot aggregation, persistence, schema creation, and model publication. Preserve all tests that verify refresh de-duplication, generation ordering, server quota publication, error state, and quota-cycle Token statistics.
 
-- [ ] **Step 2: Remove obsolete production code**
+- [x] **Step 2: Remove obsolete production code**
 
 Remove quota-history types, store methods, `invalidQuotaUsageSample`, new-database schema statements, model state, record calls, and the private recorder. Do not add a migration or `DROP TABLE` statement, so an existing table remains physically untouched.
 
-- [ ] **Step 3: Prove no rejected pipeline remains**
+- [x] **Step 3: Prove no rejected pipeline remains**
 
 Run:
 
@@ -152,7 +152,7 @@ rg -n "QuotaUsageSample|QuotaDailyUsage|quotaDailyUsage|quota_usage_samples|inva
 
 Expected: no matches.
 
-- [ ] **Step 4: Run model and store tests**
+- [x] **Step 4: Run model and store tests**
 
 Run: `swift test --filter 'SessionListModelTests|MetadataStoreTests'`
 
@@ -167,13 +167,13 @@ Expected: all selected tests pass, including refresh-generation coverage.
 **Interfaces:**
 - Produces: a formatted, tested, signed local application
 
-- [ ] **Step 1: Run the full quality gate**
+- [x] **Step 1: Run the full quality gate**
 
 Run: `bash Scripts/check.sh`
 
 Expected: strict Swift formatting lint passes and the full serialized test suite passes.
 
-- [ ] **Step 2: Package and verify signing**
+- [x] **Step 2: Package and verify signing**
 
 Run:
 
@@ -184,15 +184,15 @@ codesign --verify --deep --strict dist/SessionNest.app
 
 Expected: packaging succeeds and `codesign` exits 0.
 
-- [ ] **Step 3: Update the local installed client**
+- [x] **Step 3: Update the local installed client**
 
 Quit the running SessionNest process, replace `/Applications/SessionNest.app` with the packaged app, launch it, and verify the running executable resolves inside `/Applications/SessionNest.app`.
 
-- [ ] **Step 4: Verify status-item stability**
+- [x] **Step 4: Verify status-item stability**
 
 Open and close the status popover repeatedly, confirm the daily Token bars and exact detail appear, and confirm no new SessionNest crash report was created.
 
-- [ ] **Step 5: Commit the implementation**
+- [x] **Step 5: Commit the implementation**
 
 Run:
 
