@@ -43,6 +43,7 @@ enum SessionStatistics {
         dailyUsage: [ThreadTokenDailyUsage],
         threadProjects: [String: ThreadProjectCache],
         projectIdentityIndex: ThreadProjectIdentityIndex = .empty,
+        usageAttributionThreadIDs: [String: String] = [:],
         timeFilter: SessionTimeFilter,
         calendar: Calendar,
         now: Int64
@@ -53,6 +54,7 @@ enum SessionStatistics {
             dailyUsage: dailyUsage,
             threadProjects: threadProjects,
             projectIdentityIndex: projectIdentityIndex,
+            usageAttributionThreadIDs: usageAttributionThreadIDs,
             cutoff: cutoff(for: timeFilter, calendar: calendar, now: now),
             calendar: calendar,
             now: now
@@ -65,6 +67,7 @@ enum SessionStatistics {
         timedUsage: [ThreadTokenTimedUsage],
         threadProjects: [String: ThreadProjectCache],
         projectIdentityIndex: ThreadProjectIdentityIndex = .empty,
+        usageAttributionThreadIDs: [String: String] = [:],
         startingAt cutoff: Int64,
         calendar: Calendar,
         now: Int64
@@ -103,6 +106,7 @@ enum SessionStatistics {
             dailyUsage: dailyUsage,
             threadProjects: threadProjects,
             projectIdentityIndex: projectIdentityIndex,
+            usageAttributionThreadIDs: usageAttributionThreadIDs,
             cutoff: startDay,
             calendar: calendar,
             now: now
@@ -115,6 +119,7 @@ enum SessionStatistics {
         dailyUsage: [ThreadTokenDailyUsage],
         threadProjects: [String: ThreadProjectCache],
         projectIdentityIndex: ThreadProjectIdentityIndex = .empty,
+        usageAttributionThreadIDs: [String: String] = [:],
         startingAt cutoff: Int64,
         calendar: Calendar,
         now: Int64
@@ -125,6 +130,7 @@ enum SessionStatistics {
             dailyUsage: dailyUsage,
             threadProjects: threadProjects,
             projectIdentityIndex: projectIdentityIndex,
+            usageAttributionThreadIDs: usageAttributionThreadIDs,
             cutoff: cutoff,
             calendar: calendar,
             now: now
@@ -137,6 +143,7 @@ enum SessionStatistics {
         dailyUsage: [ThreadTokenDailyUsage],
         threadProjects: [String: ThreadProjectCache],
         projectIdentityIndex: ThreadProjectIdentityIndex,
+        usageAttributionThreadIDs: [String: String],
         cutoff: Int64?,
         calendar: Calendar,
         now: Int64
@@ -151,20 +158,23 @@ enum SessionStatistics {
         }.reduce(into: [String: CodexThread]()) {
             $0[$1.id] = $1
         }
-        let rangeUsage = dailyUsage.filter { row in
-            guard eligibleThreadByID[row.threadID] != nil,
+        let rangeUsage = dailyUsage.compactMap { row -> (ThreadTokenDailyUsage, String)? in
+            let attributionThreadID = usageAttributionThreadIDs[row.threadID] ?? row.threadID
+            guard eligibleThreadByID[attributionThreadID] != nil,
                 coveredThreadIDs.contains(row.threadID),
                 !row.usage.isZero
-            else { return false }
-            guard let cutoff else { return true }
+            else { return nil }
+            guard let cutoff else { return (row, attributionThreadID) }
             return row.dayStart >= cutoff && row.dayStart <= todayStart
+                ? (row, attributionThreadID) : nil
         }
 
         var usageByDay: [Int64: TokenUsageBreakdown] = [:]
         var usageByThread: [String: TokenUsageBreakdown] = [:]
-        for row in rangeUsage {
+        for (row, attributionThreadID) in rangeUsage {
             usageByDay[row.dayStart] = (usageByDay[row.dayStart] ?? .zero) + row.usage
-            usageByThread[row.threadID] = (usageByThread[row.threadID] ?? .zero) + row.usage
+            usageByThread[attributionThreadID] =
+                (usageByThread[attributionThreadID] ?? .zero) + row.usage
         }
 
         let measuredThreadByID = eligibleThreadByID.filter {

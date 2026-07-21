@@ -29,6 +29,7 @@ SessionNest is an independent open-source project and is not affiliated with or 
 - Monitor session count and Token-statistics coverage from the menu bar
 - Check GitHub Releases at most once every 24 hours and open the trusted release page when an
   update is available
+- Choose whether SessionNest launches in the menu bar only or opens its main window
 - Follow the system appearance or choose a light or dark theme
 
 ## Build and test

@@ -853,7 +853,7 @@ import Testing
         rolloutPath: fixture.thread.path!,
         fileSize: 0,
         fileModificationTimeNS: 0,
-        parserVersion: 2,
+        parserVersion: 3,
         result: cachedResult,
         rebuild: true
     )
@@ -877,6 +877,46 @@ import Testing
     #expect(model.errorMessage == nil)
     await probe.release()
     try await waitForTokenCondition { !model.isScanningTokenUsage }
+}
+
+@MainActor
+@Test func tokenScanIncludesSubagentUsageWithoutAddingAVisibleSession() async throws {
+    let fixture = try SessionModelFixture(threadID: "parent", createRollout: true)
+    defer { fixture.remove() }
+    let childURL = fixture.directoryURL.appendingPathComponent("child.jsonl")
+    try Data().write(to: childURL)
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        tokenScanOperation: { url, _, _, _ in
+            tokenScanResult(total: url == childURL ? 70 : 100, dayStart: 100)
+        },
+        tokenScanTargetDiscoveryOperation: { _ in
+            [
+                TokenScanTarget(
+                    id: fixture.thread.id,
+                    attributionThreadID: fixture.thread.id,
+                    url: URL(fileURLWithPath: fixture.thread.path!)
+                ),
+                TokenScanTarget(
+                    id: "child",
+                    attributionThreadID: fixture.thread.id,
+                    url: childURL
+                ),
+            ]
+        },
+        threadReloadOperation: { ([fixture.thread], []) }
+    )
+    model.timeFilter = .all
+
+    await model.reload()
+    try await waitForTokenCondition { !model.isScanningTokenUsage }
+
+    #expect(model.statisticsSnapshot.totalUsage.totalTokens == 170)
+    #expect(model.statisticsSnapshot.totalSessionCount == 1)
+    #expect(model.statisticsSnapshot.measuredSessionCount == 1)
+    #expect(model.statisticsSnapshot.sessionRows.map(\.threadID) == [fixture.thread.id])
+    #expect(model.statisticsSnapshot.sessionRows.map(\.usage.totalTokens) == [170])
 }
 
 @MainActor

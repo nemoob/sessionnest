@@ -1,6 +1,14 @@
 import AppKit
 import SwiftUI
 
+enum SessionNestLaunchPreference {
+    static let opensMainWindowKey = "sessionnest.launch.opensMainWindow"
+
+    static func shouldOpenMainWindow(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: opensMainWindowKey)
+    }
+}
+
 enum SessionNestPresentationTransition {
     case launch
     case openMainWindow
@@ -25,6 +33,7 @@ final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDel
     private var updateChecker: AppUpdateChecker?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let shouldOpenMainWindow = SessionNestLaunchPreference.shouldOpenMainWindow()
         apply(.launch)
         prepareSession()
 
@@ -39,6 +48,9 @@ final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDel
             self?.openMainWindow()
         }
         controller.install()
+        if shouldOpenMainWindow {
+            openMainWindow()
+        }
         Task {
             await updateChecker.check(.automatic)
         }
