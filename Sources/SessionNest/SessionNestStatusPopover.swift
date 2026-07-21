@@ -346,6 +346,8 @@ struct SessionNestStatusPopover: View {
     }
 
     private var overview: some View {
+        let now = Int64(Date().timeIntervalSince1970)
+        let calendar = Calendar.current
         let statisticsScope = StatusPopoverStatisticsScope.resolve(
             cycleSnapshot: model.quotaCycleStatisticsSnapshot,
             fallbackSnapshot: model.statisticsSnapshot(for: .sevenDays)
@@ -358,7 +360,8 @@ struct SessionNestStatusPopover: View {
             account: model.accountSnapshot,
             isLoading: model.isLoading,
             isRefreshing: refreshState.isRefreshing || model.isRefreshingUsage
-                || model.isScanningTokenUsage
+                || model.isScanningTokenUsage,
+            now: now
         )
         let statistics = MenuBarStatisticsStatus(
             snapshot: snapshot,
@@ -426,6 +429,13 @@ struct SessionNestStatusPopover: View {
                 Text("配额")
                     .font(.subheadline.weight(.semibold))
                 quotaRow(title: "每周", quota: status.weeklyQuota)
+                Text(statisticsScope.dailyTokenTitle)
+                    .font(.subheadline.weight(.semibold))
+                DailyTokenUsageChart(
+                    points: statistics.dailyPoints,
+                    now: now,
+                    calendar: calendar
+                )
                 resetCreditsRow(resetCredits)
 
                 Text(statisticsScope.title)

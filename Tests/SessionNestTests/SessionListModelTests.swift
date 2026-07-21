@@ -88,6 +88,55 @@ import Testing
 }
 
 @MainActor
+@Test func staleFullReloadUsageResponseDoesNotOverwriteNewerRefresh() async throws {
+    let fixture = try SessionModelFixture(
+        threadID: "stale-full-reload-usage",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let now = Date()
+    let cycleResetsAt = Int64(now.timeIntervalSince1970) + 86_400
+    let staleSnapshot = try weeklyRateLimitSnapshot(
+        usedPercent: 80,
+        resetsAt: cycleResetsAt
+    )
+    let currentSnapshot = try weeklyRateLimitSnapshot(
+        usedPercent: 20,
+        resetsAt: cycleResetsAt
+    )
+    let probe = InterleavedRateLimitRefreshProbe(
+        snapshots: [staleSnapshot, currentSnapshot]
+    )
+    let reloadThread = directoryThread("from-reload", cwd: "/work/reload")
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        rateLimitRefreshOperation: { await probe.load() },
+        threadReloadOperation: { ([reloadThread], []) }
+    )
+
+    let reload = Task { await model.reload() }
+    try await waitForTokenCondition { await probe.callCount == 1 }
+    let refresh = Task { await model.refreshRateLimits(now: now) }
+    try await waitForTokenCondition { await probe.callCount == 2 }
+    await probe.release(request: 1)
+    await refresh.value
+    await probe.release(request: 0)
+    await reload.value
+
+    #expect(model.rateLimitSnapshot == currentSnapshot)
+    #expect(model.lastSuccessfulUsageRefreshAt == now)
+    #expect(model.activeThreads.map(\.id) == ["from-reload"])
+}
+
+@Suite struct SessionNestQuotaRefreshScheduleTests {
+    @Test func quotaRefreshKeepsEnergyBalancedInterval() {
+        #expect(SessionNestQuotaRefreshSchedule.interval == 10 * 60)
+        #expect(SessionNestQuotaRefreshSchedule.tolerance == 60)
+    }
+}
+
+@MainActor
 @Test func lightweightRateLimitRefreshPublishesProgressAndCompletionMetadata() async throws {
     let fixture = try SessionModelFixture(
         threadID: "lightweight-rate-limit-state",
@@ -1141,6 +1190,29 @@ private actor DeferredRateLimitRefreshProbe {
     }
 }
 
+private actor InterleavedRateLimitRefreshProbe {
+    private let snapshots: [CodexRateLimitSnapshot]
+    private var releasedRequests: Set<Int> = []
+    private(set) var callCount = 0
+
+    init(snapshots: [CodexRateLimitSnapshot]) {
+        self.snapshots = snapshots
+    }
+
+    func load() async -> CodexRateLimitSnapshot {
+        let request = callCount
+        callCount += 1
+        while !releasedRequests.contains(request) {
+            await Task.yield()
+        }
+        return snapshots[request]
+    }
+
+    func release(request: Int) {
+        releasedRequests.insert(request)
+    }
+}
+
 private actor ReplacementTokenScanProbe {
     private(set) var callCount = 0
 
@@ -1215,12 +1287,16 @@ private func tokenScanResult(total: Int64, dayStart: Int64) -> TokenScanResult {
     )
 }
 
-private func weeklyRateLimitSnapshot(usedPercent: Double) throws -> CodexRateLimitSnapshot {
-    try JSONDecoder().decode(
+private func weeklyRateLimitSnapshot(
+    usedPercent: Double,
+    resetsAt: Int64? = nil
+) throws -> CodexRateLimitSnapshot {
+    let resetsAtJSON = resetsAt.map { ",\"resetsAt\":\($0)" } ?? ""
+    return try JSONDecoder().decode(
         CodexRateLimitSnapshot.self,
         from: Data(
             """
-            {"primary":{"usedPercent":\(usedPercent),"windowDurationMins":10080}}
+            {"primary":{"usedPercent":\(usedPercent),"windowDurationMins":10080\(resetsAtJSON)}}
             """.utf8
         )
     )

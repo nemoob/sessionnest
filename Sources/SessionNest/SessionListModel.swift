@@ -441,6 +441,7 @@ final class SessionListModel: ObservableObject {
     private let tokenScanOperation: TokenScanOperation
     private let tokenScanTargetDiscoveryOperation: TokenScanTargetDiscoveryOperation
     private let threadReloadOperation: ThreadReloadOperation?
+    private let refreshesUsageDuringReload: Bool
     private var stateRevision = SessionStateRevision()
     private var classificationTask: Task<Void, Never>?
     private var classificationGeneration = 0
@@ -450,6 +451,7 @@ final class SessionListModel: ObservableObject {
     private var tokenScanReplacementRequest = 0
     private var reloadTask: Task<Void, Never>?
     private var rateLimitRefreshTask: Task<Void, Never>?
+    private var usageRefreshGeneration = 0
 
     private static let tokenParserVersion: Int64 = 3
     static let automaticRefreshInterval: TimeInterval = 15 * 60
@@ -541,6 +543,10 @@ final class SessionListModel: ObservableObject {
                 }.value
             }
         self.threadReloadOperation = threadReloadOperation
+        refreshesUsageDuringReload =
+            threadReloadOperation == nil
+            || rateLimitRefreshOperation != nil
+            || usageRefreshOperation != nil
     }
 
     func reload() async {
@@ -590,8 +596,16 @@ final class SessionListModel: ObservableObject {
             let projectIdentityIndex = await Task.detached(priority: .utility) {
                 ThreadProjectIdentityIndex.build(threads: allThreads)
             }.value
-            let usageSnapshot =
-                threadReloadOperation == nil ? try? await client.readUsageSnapshot() : nil
+            let usageGeneration: Int?
+            let usageSnapshot: CodexUsageSnapshot?
+            if refreshesUsageDuringReload {
+                let generation = beginUsageRefresh()
+                usageGeneration = generation
+                usageSnapshot = try? await usageRefreshOperation()
+            } else {
+                usageGeneration = nil
+                usageSnapshot = nil
+            }
             let accountSnapshot =
                 threadReloadOperation == nil ? try? await client.readAccount() : nil
             guard stateRevision.accepts(revision) else { return }
@@ -613,16 +627,24 @@ final class SessionListModel: ObservableObject {
             tokenAttributionThreadIDs = Dictionary(
                 uniqueKeysWithValues: allThreads.map { ($0.id, $0.id) }
             )
-            rateLimitSnapshot = usageSnapshot?.rateLimits
-            resetCreditsSnapshot = usageSnapshot?.resetCredits
             self.accountSnapshot = accountSnapshot
-            lastSuccessfulReloadAt = Date()
-            if usageSnapshot != nil {
-                lastSuccessfulUsageRefreshAt = lastSuccessfulReloadAt
+            let reloadCompletedAt = Date()
+            lastSuccessfulReloadAt = reloadCompletedAt
+            var acceptedUsageGeneration: Int?
+            if let usageSnapshot,
+                let usageGeneration,
+                acceptsUsageRefresh(usageGeneration)
+            {
+                rateLimitSnapshot = usageSnapshot.rateLimits
+                resetCreditsSnapshot = usageSnapshot.resetCredits
+                lastSuccessfulUsageRefreshAt = reloadCompletedAt
                 usageRefreshErrorMessage = nil
+                acceptedUsageGeneration = usageGeneration
             }
             errorMessage = nil
-            await refreshQuotaCycleStatistics()
+            await refreshQuotaCycleStatistics(
+                acceptingUsageGeneration: acceptedUsageGeneration
+            )
             await startProjectClassification(
                 for: allThreads,
                 projectIdentityIndex: projectIdentityIndex
@@ -657,15 +679,17 @@ final class SessionListModel: ObservableObject {
         isRefreshingUsage = true
         let task = Task { [weak self] in
             guard let self else { return }
+            let generation = beginUsageRefresh()
             do {
                 let snapshot = try await usageRefreshOperation()
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, acceptsUsageRefresh(generation) else { return }
                 rateLimitSnapshot = snapshot.rateLimits
                 resetCreditsSnapshot = snapshot.resetCredits
                 lastSuccessfulUsageRefreshAt = now
                 usageRefreshErrorMessage = nil
-                await refreshQuotaCycleStatistics()
+                await refreshQuotaCycleStatistics(acceptingUsageGeneration: generation)
             } catch {
+                guard acceptsUsageRefresh(generation) else { return }
                 usageRefreshErrorMessage = error.localizedDescription
             }
         }
@@ -688,6 +712,15 @@ final class SessionListModel: ObservableObject {
         else { return }
 
         await refreshRateLimits(now: now)
+    }
+
+    private func beginUsageRefresh() -> Int {
+        usageRefreshGeneration += 1
+        return usageRefreshGeneration
+    }
+
+    private func acceptsUsageRefresh(_ generation: Int) -> Bool {
+        generation == usageRefreshGeneration
     }
 
     private func loadThreadLists() async throws -> ([CodexThread], [CodexThread]) {
@@ -1111,8 +1144,12 @@ final class SessionListModel: ObservableObject {
 
     private func refreshQuotaCycleStatistics(
         now: Int64 = Int64(Date().timeIntervalSince1970),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        acceptingUsageGeneration: Int? = nil
     ) async {
+        if let acceptingUsageGeneration {
+            guard acceptsUsageRefresh(acceptingUsageGeneration) else { return }
+        }
         guard
             let start = QuotaCycleWindow.startTimestamp(
                 window: rateLimitSnapshot?.weeklyWindow
@@ -1127,6 +1164,9 @@ final class SessionListModel: ObservableObject {
                 startingAt: start,
                 endingAt: now
             )
+            if let acceptingUsageGeneration {
+                guard acceptsUsageRefresh(acceptingUsageGeneration) else { return }
+            }
             quotaCycleStatisticsSnapshot = SessionStatistics.build(
                 threads: activeThreads + archivedThreads,
                 coveredThreadIDs: tokenCoveredThreadIDs,
@@ -1139,6 +1179,9 @@ final class SessionListModel: ObservableObject {
                 now: now
             )
         } catch {
+            if let acceptingUsageGeneration {
+                guard acceptsUsageRefresh(acceptingUsageGeneration) else { return }
+            }
             quotaCycleStatisticsSnapshot = nil
         }
     }
