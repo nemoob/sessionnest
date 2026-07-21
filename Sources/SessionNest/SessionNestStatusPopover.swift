@@ -477,7 +477,11 @@ struct SessionNestStatusPopover: View {
 
             Text("配额")
                 .font(.subheadline.weight(.semibold))
-            quotaRow(title: "每周", quota: status.weeklyQuota)
+            quotaRow(
+                title: "每周",
+                quota: status.weeklyQuota,
+                usesPlatformProgress: includesScreenshotAction
+            )
             Text(statisticsScope.dailyTokenTitle)
                 .font(.subheadline.weight(.semibold))
             DailyTokenUsageChart(
@@ -491,8 +495,13 @@ struct SessionNestStatusPopover: View {
                 .font(.subheadline.weight(.semibold))
             if statistics.showsTokenScanProgress {
                 HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
+                    if includesScreenshotAction {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.caption)
+                    }
                     Text("正在统计 Token…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -553,7 +562,11 @@ struct SessionNestStatusPopover: View {
                                     .foregroundStyle(.secondary)
                                     .monospacedDigit()
                             }
-                            ProgressView(value: statistics.projectFraction(project))
+                            overviewProgressBar(
+                                value: statistics.projectFraction(project),
+                                tint: .accentColor,
+                                usesPlatformProgress: includesScreenshotAction
+                            )
                         }
                     }
                 }
@@ -568,7 +581,11 @@ struct SessionNestStatusPopover: View {
                 Text(status.tokenCoveragePercentText)
                     .foregroundStyle(.secondary)
             }
-            ProgressView(value: status.tokenCoverageFraction)
+            overviewProgressBar(
+                value: status.tokenCoverageFraction,
+                tint: .accentColor,
+                usesPlatformProgress: includesScreenshotAction
+            )
             Text(status.tokenCoverageText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -787,7 +804,11 @@ struct SessionNestStatusPopover: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func quotaRow(title: String, quota: MenuBarQuotaStatus) -> some View {
+    private func quotaRow(
+        title: String,
+        quota: MenuBarQuotaStatus,
+        usesPlatformProgress: Bool
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
@@ -796,8 +817,25 @@ struct SessionNestStatusPopover: View {
                 Text(quota.resetText)
                     .foregroundStyle(.secondary)
             }
-            ProgressView(value: quota.fraction)
-                .tint(quota.color.swiftUIColor)
+            overviewProgressBar(
+                value: quota.fraction,
+                tint: quota.color.swiftUIColor,
+                usesPlatformProgress: usesPlatformProgress
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func overviewProgressBar(
+        value: Double,
+        tint: Color,
+        usesPlatformProgress: Bool
+    ) -> some View {
+        if usesPlatformProgress {
+            ProgressView(value: value)
+                .tint(tint)
+        } else {
+            StatusPopoverScreenshotProgressBar(value: value, tint: tint)
         }
     }
 

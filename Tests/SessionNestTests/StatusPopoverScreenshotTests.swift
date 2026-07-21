@@ -42,3 +42,22 @@ import Testing
     }
     #expect(pasteboard.string(forType: .string) == "保留内容")
 }
+
+@MainActor
+@Test func screenshotProgressBarRendersWithoutAnAppKitProgressView() throws {
+    let pasteboard = NSPasteboard(name: .init("SessionNestScreenshotTests.progress"))
+    pasteboard.clearContents()
+    let content = StatusPopoverScreenshotProgressBar(value: 0.6, tint: .green)
+        .frame(width: 200)
+
+    try StatusPopoverScreenshotCopier().copy(
+        content: content,
+        scale: 1,
+        pasteboard: pasteboard
+    )
+
+    let data = try #require(pasteboard.data(forType: .png))
+    let image = try #require(NSBitmapImageRep(data: data))
+    #expect(image.pixelsWide == 200)
+    #expect(image.pixelsHigh > 0)
+}

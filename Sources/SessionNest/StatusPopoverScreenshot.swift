@@ -32,3 +32,21 @@ struct StatusPopoverScreenshotCopier {
         }
     }
 }
+
+struct StatusPopoverScreenshotProgressBar: View {
+    let value: Double
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.secondary.opacity(0.2))
+                Capsule()
+                    .fill(tint)
+                    .frame(width: proxy.size.width * min(max(value, 0), 1))
+            }
+        }
+        .frame(height: 4)
+    }
+}
