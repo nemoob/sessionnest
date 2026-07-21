@@ -440,6 +440,104 @@ import Testing
     #expect(status.weeklyQuota.resetAtText == "重置时间 --")
 }
 
+@Test func quotaDailyUsagePresentationBuildsOrderedSevenDayDomain() {
+    let calendar = quotaChartCalendar()
+    let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
+    let expected = (15...21).map {
+        quotaChartTimestamp(2026, 7, $0, calendar: calendar)
+    }
+
+    #expect(
+        QuotaDailyUsagePresentation.dayDomain(now: now, calendar: calendar) == expected
+    )
+}
+
+@Test func quotaDailyUsagePresentationFormatsChineseDayLabels() {
+    let calendar = quotaChartCalendar()
+    let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
+    let today = quotaChartTimestamp(2026, 7, 21, calendar: calendar)
+    let yesterday = quotaChartTimestamp(2026, 7, 20, calendar: calendar)
+    let monday = quotaChartTimestamp(2026, 7, 20, calendar: calendar)
+
+    #expect(
+        QuotaDailyUsagePresentation.dayLabel(today, now: now, calendar: calendar) == "今天"
+    )
+    #expect(
+        QuotaDailyUsagePresentation.dayLabel(yesterday, now: now, calendar: calendar)
+            == "昨天"
+    )
+    #expect(QuotaDailyUsagePresentation.weekdayLabel(monday, calendar: calendar) == "周一")
+}
+
+@Test func quotaDailyUsagePresentationFormatsPercentagesWithoutInventingUnknownValues() {
+    #expect(QuotaDailyUsagePresentation.percentage(3.24) == "3.2%")
+    #expect(QuotaDailyUsagePresentation.percentage(3) == "3%")
+    #expect(QuotaDailyUsagePresentation.percentage(nil) == "--")
+    #expect(QuotaDailyUsagePresentation.emptyText == "从现在开始记录每日额度变化")
+    #expect(
+        QuotaDailyUsagePresentation.observationCaption
+            == "仅统计本地观察到的 Codex 额度快照，无法回溯此前用量"
+    )
+}
+
+@Test func quotaDailyUsagePresentationMatchesTokensWithoutUsingZeroForMissingData() {
+    let known = StatisticsDailyPoint(
+        dayStart: 200,
+        usage: TokenUsageBreakdown(
+            inputTokens: 8_000,
+            cachedInputTokens: 3_000,
+            outputTokens: 1_000,
+            reasoningOutputTokens: 500,
+            totalTokens: 10_000
+        )
+    )
+
+    #expect(
+        QuotaDailyUsagePresentation.tokenText(for: 200, in: [known]) == "1万 Token"
+    )
+    #expect(QuotaDailyUsagePresentation.tokenText(for: 300, in: [known]) == nil)
+}
+
+@Test func quotaDailyUsageSelectionClampsOutsideRangeAndChoosesEarlierTie() {
+    let points = [
+        QuotaDailyUsagePoint(dayStart: 100, usedPercent: 1),
+        QuotaDailyUsagePoint(dayStart: 200, usedPercent: 2),
+        QuotaDailyUsagePoint(dayStart: 300, usedPercent: 3),
+    ]
+
+    #expect(QuotaDailyUsageChartSelection.nearestPoint(to: 10, in: points)?.dayStart == 100)
+    #expect(QuotaDailyUsageChartSelection.nearestPoint(to: 390, in: points)?.dayStart == 300)
+    #expect(QuotaDailyUsageChartSelection.nearestPoint(to: 150, in: points)?.dayStart == 100)
+    #expect(QuotaDailyUsageChartSelection.nearestPoint(to: 151, in: points)?.dayStart == 200)
+}
+
+@Test func quotaDailyUsageSelectionReconcilesSelectedPoint() {
+    let points = [
+        QuotaDailyUsagePoint(dayStart: 100, usedPercent: 1),
+        QuotaDailyUsagePoint(dayStart: 200, usedPercent: 2),
+    ]
+
+    #expect(QuotaDailyUsageChartSelection.reconcile(selectedDay: nil, in: points) == nil)
+    #expect(QuotaDailyUsageChartSelection.reconcile(selectedDay: 100, in: points) == 100)
+    #expect(QuotaDailyUsageChartSelection.reconcile(selectedDay: 300, in: points) == nil)
+}
+
+@Test func quotaDailyUsageChartKeepsCompactHeightAndReadableAccessibility() {
+    let calendar = quotaChartCalendar()
+    let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
+    let today = quotaChartTimestamp(2026, 7, 21, calendar: calendar)
+
+    #expect(QuotaDailyUsagePresentation.chartHeight == 110)
+    #expect(
+        QuotaDailyUsagePresentation.accessibilityLabel(
+            dayStart: today,
+            usedPercent: 3.24,
+            now: now,
+            calendar: calendar
+        ) == "今天，消耗 3.2%"
+    )
+}
+
 @Test func quotaStatusFormatsAbsoluteResetInProvidedCalendar() {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -496,5 +594,25 @@ private func resetCredit(
         expiresAt: expiresAt,
         title: "Full reset",
         description: "Granted"
+    )
+}
+
+private func quotaChartCalendar() -> Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    return calendar
+}
+
+private func quotaChartTimestamp(
+    _ year: Int,
+    _ month: Int,
+    _ day: Int,
+    hour: Int = 0,
+    calendar: Calendar
+) -> Int64 {
+    Int64(
+        calendar.date(
+            from: DateComponents(year: year, month: month, day: day, hour: hour)
+        )!.timeIntervalSince1970
     )
 }
