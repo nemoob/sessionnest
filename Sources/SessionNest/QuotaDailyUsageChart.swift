@@ -66,7 +66,21 @@ enum QuotaDailyUsagePresentation {
         now: Int64,
         calendar: Calendar
     ) -> String {
-        "\(dayLabel(dayStart, now: now, calendar: calendar))，消耗 \(percentage(usedPercent))"
+        let relativeLabel = dayLabel(dayStart, now: now, calendar: calendar)
+        let fullDateLabel = fullDateLabel(dayStart, calendar: calendar)
+        let dateLabel =
+            relativeLabel == "今天" || relativeLabel == "昨天"
+            ? "\(relativeLabel)，\(fullDateLabel)"
+            : fullDateLabel
+        return "\(dateLabel)，消耗 \(percentage(usedPercent))"
+    }
+
+    private static func fullDateLabel(_ dayStart: Int64, calendar: Calendar) -> String {
+        let components = calendar.dateComponents(
+            [.year, .month, .day],
+            from: Date(timeIntervalSince1970: TimeInterval(dayStart))
+        )
+        return "\(components.year ?? 0)年\(components.month ?? 0)月\(components.day ?? 0)日"
     }
 }
 

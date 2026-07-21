@@ -526,6 +526,7 @@ import Testing
     let calendar = quotaChartCalendar()
     let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
     let today = quotaChartTimestamp(2026, 7, 21, calendar: calendar)
+    let earlierDay = quotaChartTimestamp(2026, 7, 19, calendar: calendar)
 
     #expect(QuotaDailyUsagePresentation.chartHeight == 110)
     #expect(
@@ -534,7 +535,15 @@ import Testing
             usedPercent: 3.24,
             now: now,
             calendar: calendar
-        ) == "今天，消耗 3.2%"
+        ) == "今天，2026年7月21日，消耗 3.2%"
+    )
+    #expect(
+        QuotaDailyUsagePresentation.accessibilityLabel(
+            dayStart: earlierDay,
+            usedPercent: 1,
+            now: now,
+            calendar: calendar
+        ) == "2026年7月19日，消耗 1%"
     )
 }
 
