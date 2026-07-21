@@ -27,6 +27,24 @@ import Testing
     #expect(refreshing.isAnimating)
 }
 
+@Test func screenshotFeedbackUsesClearClipboardMessagesAndSymbols() {
+    #expect(StatusPopoverScreenshotFeedback.idle.systemImage == "camera")
+    #expect(
+        StatusPopoverScreenshotFeedback.idle.title
+            == "复制完整截图（包含账号信息）"
+    )
+    #expect(StatusPopoverScreenshotFeedback.copied.systemImage == "checkmark")
+    #expect(
+        StatusPopoverScreenshotFeedback.copied.title
+            == "完整截图已复制，可直接粘贴"
+    )
+    #expect(
+        StatusPopoverScreenshotFeedback.failed.systemImage
+            == "exclamationmark.triangle"
+    )
+    #expect(StatusPopoverScreenshotFeedback.failed.errorText == "截图失败，请重试")
+}
+
 @Test func updateNoticeAppearsOnlyForAvailableRelease() {
     let update = AppUpdate(
         version: AppVersion(tag: "0.2.4")!,
