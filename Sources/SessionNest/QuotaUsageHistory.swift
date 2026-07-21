@@ -15,6 +15,7 @@ struct QuotaDailyUsagePoint: Equatable, Identifiable, Sendable {
 
 enum QuotaDailyUsage {
     static let maximumGap: Int64 = 30 * 60
+    private static let weeklyCycleDuration: Int64 = 7 * 24 * 60 * 60
 
     static func build(
         samples: [QuotaUsageSample],
@@ -28,10 +29,16 @@ enum QuotaDailyUsage {
         }
 
         let earliestDayStart = Int64(earliestDay.timeIntervalSince1970)
+        let cycleStart = cycleResetsAt - weeklyCycleDuration
+        let latestSamplesByTimestamp = samples.reduce(into: [Int64: QuotaUsageSample]()) {
+            $0[$1.capturedAt] = $1
+        }
         let qualifyingSamples =
-            samples
+            latestSamplesByTimestamp.values
             .filter {
                 $0.cycleResetsAt == cycleResetsAt
+                    && $0.capturedAt >= cycleStart
+                    && $0.capturedAt <= cycleResetsAt
                     && $0.capturedAt <= now
                     && $0.usedPercent.isFinite
             }

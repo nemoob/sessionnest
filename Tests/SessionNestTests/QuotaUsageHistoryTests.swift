@@ -165,7 +165,72 @@ struct QuotaUsageHistoryTests {
                 })
     }
 
-    private let cycleResetsAt: Int64 = 1_784_160_000
+    @Test func excludesSamplesImmediatelyBeforeTheWeeklyCycleStart() {
+        let calendar = calendar(timeZone: "UTC")
+        let cycleStart = cycleResetsAt - 7 * 24 * 60 * 60
+
+        let points = QuotaDailyUsage.build(
+            samples: [
+                sample(at: cycleStart - 60, usedPercent: 10),
+                sample(at: cycleStart, usedPercent: 20),
+                sample(at: cycleStart + 60, usedPercent: 30),
+            ],
+            cycleResetsAt: cycleResetsAt,
+            now: cycleStart + 60,
+            calendar: calendar
+        )
+
+        #expect(
+            points == [
+                QuotaDailyUsagePoint(
+                    dayStart: dayStart(cycleStart, calendar: calendar), usedPercent: 10)
+            ])
+    }
+
+    @Test func excludesSamplesImmediatelyAfterTheWeeklyReset() {
+        let calendar = calendar(timeZone: "UTC")
+
+        let points = QuotaDailyUsage.build(
+            samples: [
+                sample(at: cycleResetsAt - 60, usedPercent: 20),
+                sample(at: cycleResetsAt, usedPercent: 30),
+                sample(at: cycleResetsAt + 60, usedPercent: 50),
+            ],
+            cycleResetsAt: cycleResetsAt,
+            now: cycleResetsAt + 60,
+            calendar: calendar
+        )
+
+        #expect(
+            points == [
+                QuotaDailyUsagePoint(
+                    dayStart: dayStart(cycleResetsAt, calendar: calendar), usedPercent: 10)
+            ])
+    }
+
+    @Test func duplicateCaptureTimestampsKeepTheLastInputSample() {
+        let calendar = calendar(timeZone: "UTC")
+        let start = timestamp(2026, 7, 15, hour: 10, calendar: calendar)
+
+        let points = QuotaDailyUsage.build(
+            samples: [
+                sample(at: start, usedPercent: 10),
+                sample(at: start + 5 * 60, usedPercent: 20),
+                sample(at: start + 5 * 60, usedPercent: 30),
+                sample(at: start + 10 * 60, usedPercent: 45),
+            ],
+            cycleResetsAt: cycleResetsAt,
+            now: start + 10 * 60,
+            calendar: calendar
+        )
+
+        #expect(
+            points == [
+                QuotaDailyUsagePoint(dayStart: dayStart(start, calendar: calendar), usedPercent: 35)
+            ])
+    }
+
+    private let cycleResetsAt: Int64 = 1_784_678_400
 
     private func sample(at capturedAt: Int64, usedPercent: Double) -> QuotaUsageSample {
         QuotaUsageSample(
