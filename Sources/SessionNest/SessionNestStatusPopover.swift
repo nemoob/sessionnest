@@ -345,6 +345,7 @@ struct SessionNestStatusPopover: View {
     @ObservedObject var refreshState: StatusItemRefreshState
     @ObservedObject var updateChecker: AppUpdateChecker
     @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var systemColorScheme
     @State private var page = StatusPopoverPage.overview
     @State private var screenshotFeedback = StatusPopoverScreenshotFeedback.idle
     @AppStorage("sessionnest.theme") private var storedTheme = AppTheme.system.rawValue
@@ -603,14 +604,18 @@ struct SessionNestStatusPopover: View {
 
     private var screenshotOverview: some View {
         let theme = AppTheme(storedValue: storedTheme)
+        let colorScheme = StatusPopoverScreenshotBackground.colorScheme(
+            for: theme,
+            systemColorScheme: systemColorScheme
+        )
 
         return overviewContent(includesScreenshotAction: false)
             .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
             .padding(16)
             .frame(width: SessionNestStatusPopoverLayout.width)
             .fixedSize(horizontal: false, vertical: true)
-            .background(StatusPopoverScreenshotBackground.color(for: theme))
-            .preferredColorScheme(theme.colorScheme)
+            .background(StatusPopoverScreenshotBackground.color(for: colorScheme))
+            .environment(\.colorScheme, colorScheme)
     }
 
     @MainActor

@@ -8,18 +8,16 @@ enum StatusPopoverScreenshotError: Error {
 }
 
 enum StatusPopoverScreenshotBackground {
-    static func color(for theme: AppTheme) -> Color {
-        let appearanceName: NSAppearance.Name?
-        switch theme {
-        case .system:
-            appearanceName = nil
-        case .light:
-            appearanceName = .aqua
-        case .dark:
-            appearanceName = .darkAqua
-        }
+    static func colorScheme(
+        for theme: AppTheme,
+        systemColorScheme: ColorScheme
+    ) -> ColorScheme {
+        theme.colorScheme ?? systemColorScheme
+    }
 
-        guard let appearanceName, let appearance = NSAppearance(named: appearanceName) else {
+    static func color(for colorScheme: ColorScheme) -> Color {
+        let appearanceName: NSAppearance.Name = colorScheme == .dark ? .darkAqua : .aqua
+        guard let appearance = NSAppearance(named: appearanceName) else {
             return Color(nsColor: .windowBackgroundColor)
         }
         var backgroundColor = NSColor.windowBackgroundColor

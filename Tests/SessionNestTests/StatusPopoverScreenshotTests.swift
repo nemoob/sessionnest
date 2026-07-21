@@ -79,11 +79,15 @@ import Testing
 }
 
 @MainActor
-@Test func darkScreenshotBackgroundDoesNotResolveThroughTheSystemAppearance() throws {
+@Test func systemDarkScreenshotUsesTheCurrentDarkAppearance() throws {
     let pasteboard = NSPasteboard(name: .init("SessionNestScreenshotTests.darkBackground"))
-    let content = StatusPopoverScreenshotBackground.color(for: .dark)
+    let colorScheme = StatusPopoverScreenshotBackground.colorScheme(
+        for: .system,
+        systemColorScheme: .dark
+    )
+    let content = StatusPopoverScreenshotBackground.color(for: colorScheme)
         .frame(width: 40, height: 40)
-        .preferredColorScheme(.dark)
+        .environment(\.colorScheme, colorScheme)
 
     try StatusPopoverScreenshotCopier().copy(
         content: content,
@@ -95,4 +99,19 @@ import Testing
     let image = try #require(NSBitmapImageRep(data: data))
     let centerColor = try #require(image.colorAt(x: 20, y: 20)?.usingColorSpace(.deviceRGB))
     #expect(centerColor.brightnessComponent < 0.5)
+}
+
+@Test func explicitScreenshotThemeOverridesTheSystemAppearance() {
+    #expect(
+        StatusPopoverScreenshotBackground.colorScheme(
+            for: .light,
+            systemColorScheme: .dark
+        ) == .light
+    )
+    #expect(
+        StatusPopoverScreenshotBackground.colorScheme(
+            for: .dark,
+            systemColorScheme: .light
+        ) == .dark
+    )
 }
