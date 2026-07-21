@@ -638,6 +638,117 @@ import Testing
     #expect(try await store.loadThreadTokenDailyUsage() == originalDailyUsage)
 }
 
+@Test func quotaUsageSamplesKeepLatestCapturePerBucketAndOrderTheRequestedCycle() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+    let cycleResetsAt: Int64 = 1_784_678_400
+
+    try await store.saveQuotaUsageSample(
+        QuotaUsageSample(cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_500, usedPercent: 20))
+    try await store.saveQuotaUsageSample(
+        QuotaUsageSample(cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_900, usedPercent: 35))
+    try await store.saveQuotaUsageSample(
+        QuotaUsageSample(cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_700, usedPercent: 25))
+    try await store.saveQuotaUsageSample(
+        QuotaUsageSample(cycleResetsAt: cycleResetsAt, capturedAt: 1_784_601_000, usedPercent: 50))
+    try await store.saveQuotaUsageSample(
+        QuotaUsageSample(
+            cycleResetsAt: cycleResetsAt + 604_800,
+            capturedAt: 1_784_600_200,
+            usedPercent: 75
+        ))
+
+    #expect(
+        try await store.loadQuotaUsageSamples(cycleResetsAt: cycleResetsAt) == [
+            QuotaUsageSample(
+                cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_900, usedPercent: 35),
+            QuotaUsageSample(
+                cycleResetsAt: cycleResetsAt, capturedAt: 1_784_601_000, usedPercent: 50),
+        ])
+}
+
+@Test func quotaUsageSamplesRejectInvalidValuesAndClampPercentages() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+    let cycleResetsAt: Int64 = 1_784_678_400
+
+    await #expect(throws: MetadataStoreError.invalidQuotaUsageSample) {
+        try await store.saveQuotaUsageSample(
+            QuotaUsageSample(cycleResetsAt: 0, capturedAt: 1_784_600_000, usedPercent: 10))
+    }
+    await #expect(throws: MetadataStoreError.invalidQuotaUsageSample) {
+        try await store.saveQuotaUsageSample(
+            QuotaUsageSample(cycleResetsAt: cycleResetsAt, capturedAt: 0, usedPercent: 10))
+    }
+    await #expect(throws: MetadataStoreError.invalidQuotaUsageSample) {
+        try await store.saveQuotaUsageSample(
+            QuotaUsageSample(
+                cycleResetsAt: cycleResetsAt,
+                capturedAt: 1_784_600_000,
+                usedPercent: .nan
+            ))
+    }
+    await #expect(throws: MetadataStoreError.invalidQuotaUsageSample) {
+        try await store.saveQuotaUsageSample(
+            QuotaUsageSample(
+                cycleResetsAt: cycleResetsAt,
+                capturedAt: 1_784_600_000,
+                usedPercent: .infinity
+            ))
+    }
+
+    try await store.saveQuotaUsageSample(
+        QuotaUsageSample(cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_000, usedPercent: -5))
+    try await store.saveQuotaUsageSample(
+        QuotaUsageSample(cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_600, usedPercent: 120))
+
+    #expect(
+        try await store.loadQuotaUsageSamples(cycleResetsAt: cycleResetsAt) == [
+            QuotaUsageSample(
+                cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_000, usedPercent: 0),
+            QuotaUsageSample(
+                cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_600, usedPercent: 100),
+        ])
+}
+
+@Test func quotaUsageSchemaIsAddedWithoutLosingExistingMetadata() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    try executeSQLite(
+        """
+        CREATE TABLE thread_meta (
+          thread_id TEXT PRIMARY KEY,
+          is_favorite INTEGER NOT NULL DEFAULT 0,
+          collection_id TEXT
+        );
+        INSERT INTO thread_meta (thread_id, is_favorite) VALUES ('existing', 1);
+        """,
+        at: databaseURL
+    )
+
+    let store = try MetadataStore(databaseURL: databaseURL)
+    let cycleResetsAt: Int64 = 1_784_678_400
+    try await store.saveQuotaUsageSample(
+        QuotaUsageSample(cycleResetsAt: cycleResetsAt, capturedAt: 1_784_600_000, usedPercent: 25))
+
+    #expect(
+        try await store.loadMetadata()["existing"]
+            == ThreadMetadata(threadID: "existing", isFavorite: true, collectionID: nil))
+    #expect(
+        try await store.loadQuotaUsageSamples(cycleResetsAt: cycleResetsAt)
+            == [
+                QuotaUsageSample(
+                    cycleResetsAt: cycleResetsAt,
+                    capturedAt: 1_784_600_000,
+                    usedPercent: 25
+                )
+            ])
+}
+
 private func tokenUsage(
     _ inputTokens: Int64,
     _ cachedInputTokens: Int64,

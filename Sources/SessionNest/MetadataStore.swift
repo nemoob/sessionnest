@@ -4,6 +4,7 @@ import SQLite3
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 enum MetadataStoreError: Error, Equatable, Sendable {
+    case invalidQuotaUsageSample
     case sqlite(String)
 }
 
@@ -304,6 +305,65 @@ actor MetadataStore {
                     ))
             case SQLITE_DONE:
                 return timedUsage
+            default:
+                throw sqliteError()
+            }
+        }
+    }
+
+    func saveQuotaUsageSample(_ sample: QuotaUsageSample) throws {
+        guard
+            sample.cycleResetsAt > 0,
+            sample.capturedAt > 0,
+            sample.usedPercent.isFinite
+        else {
+            throw MetadataStoreError.invalidQuotaUsageSample
+        }
+
+        let statement = try prepare(
+            """
+            INSERT INTO quota_usage_samples (
+              cycle_resets_at, captured_bucket, captured_at, used_percent
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(cycle_resets_at, captured_bucket) DO UPDATE SET
+              captured_at = excluded.captured_at,
+              used_percent = excluded.used_percent
+            WHERE excluded.captured_at >= quota_usage_samples.captured_at
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try bind(sample.cycleResetsAt, to: 1, in: statement)
+        try bind((sample.capturedAt / 600) * 600, to: 2, in: statement)
+        try bind(sample.capturedAt, to: 3, in: statement)
+        try bind(min(max(sample.usedPercent, 0), 100), to: 4, in: statement)
+        try finish(statement)
+    }
+
+    func loadQuotaUsageSamples(cycleResetsAt: Int64) throws -> [QuotaUsageSample] {
+        let statement = try prepare(
+            """
+            SELECT cycle_resets_at, captured_at, used_percent
+            FROM quota_usage_samples
+            WHERE cycle_resets_at = ?
+            ORDER BY captured_at ASC
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(cycleResetsAt, to: 1, in: statement)
+
+        var samples: [QuotaUsageSample] = []
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                samples.append(
+                    QuotaUsageSample(
+                        cycleResetsAt: sqlite3_column_int64(statement, 0),
+                        capturedAt: sqlite3_column_int64(statement, 1),
+                        usedPercent: sqlite3_column_double(statement, 2)
+                    ))
+            case SQLITE_DONE:
+                return samples
             default:
                 throw sqliteError()
             }
@@ -676,6 +736,15 @@ actor MetadataStore {
             );
             CREATE INDEX IF NOT EXISTS thread_token_timed_event_at
               ON thread_token_timed(event_at);
+            CREATE TABLE IF NOT EXISTS quota_usage_samples (
+              cycle_resets_at INTEGER NOT NULL,
+              captured_bucket INTEGER NOT NULL,
+              captured_at INTEGER NOT NULL,
+              used_percent REAL NOT NULL,
+              PRIMARY KEY (cycle_resets_at, captured_bucket)
+            );
+            CREATE INDEX IF NOT EXISTS quota_usage_samples_cycle_time
+              ON quota_usage_samples(cycle_resets_at, captured_at);
             """
         guard sqlite3_exec(database, schema, nil, nil, nil) == SQLITE_OK else {
             throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
@@ -776,6 +845,12 @@ actor MetadataStore {
         if let value {
             try bind(value, to: index, in: statement)
         } else if sqlite3_bind_null(statement, index) != SQLITE_OK {
+            throw sqliteError()
+        }
+    }
+
+    private func bind(_ value: Double, to index: Int32, in statement: OpaquePointer) throws {
+        guard sqlite3_bind_double(statement, index, value) == SQLITE_OK else {
             throw sqliteError()
         }
     }
