@@ -177,8 +177,13 @@ enum SessionStatistics {
                 (usageByThread[attributionThreadID] ?? .zero) + row.usage
         }
 
+        let measuredThreadIDs = Set(
+            coveredThreadIDs.map {
+                usageAttributionThreadIDs[$0] ?? $0
+            }
+        )
         let measuredThreadByID = eligibleThreadByID.filter {
-            coveredThreadIDs.contains($0.key)
+            measuredThreadIDs.contains($0.key)
         }
         let sessionRows = measuredThreadByID.map { threadID, thread in
             let resolution = ThreadProjectClassification.effectiveResolution(

@@ -31,18 +31,36 @@ import Testing
     #expect(StatusPopoverScreenshotFeedback.idle.systemImage == "camera")
     #expect(
         StatusPopoverScreenshotFeedback.idle.title
-            == "复制完整截图（包含账号信息）"
+            == "复制安全截图（已隐藏账号；右键可复制完整截图）"
     )
-    #expect(StatusPopoverScreenshotFeedback.copied.systemImage == "checkmark")
+    #expect(StatusPopoverScreenshotFeedback.safeCopied.systemImage == "checkmark")
     #expect(
-        StatusPopoverScreenshotFeedback.copied.title
-            == "完整截图已复制，可直接粘贴"
+        StatusPopoverScreenshotFeedback.safeCopied.title
+            == "安全截图已复制，账号信息已隐藏"
+    )
+    #expect(
+        StatusPopoverScreenshotFeedback.safeCopied.feedbackText
+            == "安全截图已复制，账号信息已隐藏"
+    )
+    #expect(StatusPopoverScreenshotFeedback.fullCopied.systemImage == "checkmark")
+    #expect(
+        StatusPopoverScreenshotFeedback.fullCopied.title
+            == "完整截图已复制，包含账号信息"
     )
     #expect(
         StatusPopoverScreenshotFeedback.failed.systemImage
             == "exclamationmark.triangle"
     )
     #expect(StatusPopoverScreenshotFeedback.failed.errorText == "截图失败，请重试")
+    #expect(StatusPopoverScreenshotFeedback.idle.feedbackText == nil)
+}
+
+@Test func safeScreenshotHidesAccountWithoutChangingThePopoverAccountText() {
+    let email = "person@example.com"
+
+    #expect(StatusPopoverScreenshotPrivacy.safe.emailText(email) == "账号已隐藏")
+    #expect(StatusPopoverScreenshotPrivacy.full.emailText(email) == email)
+    #expect(StatusPopoverScreenshotPrivacy.safe.emailText("--") == "--")
 }
 
 @Test func updateNoticeAppearsOnlyForAvailableRelease() {

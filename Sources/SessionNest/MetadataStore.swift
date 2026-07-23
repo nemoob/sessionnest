@@ -377,21 +377,6 @@ actor MetadataStore {
                     sqlite3_finalize(deleteStatement)
                 }
 
-                if !result.observedCheckpoint {
-                    let deleteCacheStatement = try prepare(
-                        "DELETE FROM thread_token_usage WHERE thread_id = ?"
-                    )
-                    do {
-                        try bind(threadID, to: 1, in: deleteCacheStatement)
-                        try finish(deleteCacheStatement)
-                    } catch {
-                        sqlite3_finalize(deleteCacheStatement)
-                        throw error
-                    }
-                    sqlite3_finalize(deleteCacheStatement)
-                    try execute("COMMIT")
-                    return
-                }
             }
 
             let cacheStatement = try prepare(

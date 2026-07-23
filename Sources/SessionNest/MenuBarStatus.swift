@@ -173,6 +173,37 @@ struct MenuBarResetCreditsStatus {
     }
 }
 
+struct TokenScanHealthStatus: Equatable {
+    let text: String
+    let isWarning: Bool
+
+    init(health: TokenScanHealth, isScanning: Bool) {
+        if isScanning {
+            text =
+                health.totalCount == 0
+                ? "正在发现 Token 日志…"
+                : "正在追平 Token 日志 · \(health.freshCount) / \(health.totalCount) 当前可用"
+            isWarning = false
+        } else if health.failedCount > 0, health.staleCount > 0 {
+            text =
+                "\(health.staleCount) 个日志待更新，\(health.failedCount) 个扫描失败；当前统计可能偏低"
+            isWarning = true
+        } else if health.failedCount > 0 {
+            text = "\(health.failedCount) 个日志扫描失败；旧缓存未计入当前统计"
+            isWarning = true
+        } else if health.staleCount > 0 {
+            text = "\(health.staleCount) 个日志待更新；当前统计可能偏低"
+            isWarning = true
+        } else if health.totalCount > 0 {
+            text = "Token 日志已追平 \(health.freshCount) / \(health.totalCount)（含子代理）"
+            isWarning = false
+        } else {
+            text = "尚未发现可统计的 Token 日志"
+            isWarning = false
+        }
+    }
+}
+
 struct MenuBarStatisticsStatus {
     let sessionValueText: String
     let sessionDetailText: String

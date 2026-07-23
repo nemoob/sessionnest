@@ -6,13 +6,19 @@ struct StatisticsDashboardView: View {
 
     var body: some View {
         let snapshot = model.statisticsSnapshot
+        let tokenScanHealth = TokenScanHealthStatus(
+            health: model.tokenScanHealth,
+            isScanning: model.isScanningTokenUsage
+        )
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 metricGrid(snapshot: snapshot)
 
-                if snapshot.measuredSessionCount < snapshot.totalSessionCount {
-                    coverageNotice
+                if model.isScanningTokenUsage || tokenScanHealth.isWarning
+                    || snapshot.measuredSessionCount < snapshot.totalSessionCount
+                {
+                    coverageNotice(tokenScanHealth)
                 }
 
                 if snapshot.measuredSessionCount == 0 {
@@ -66,27 +72,35 @@ struct StatisticsDashboardView: View {
         }
     }
 
-    private var coverageNotice: some View {
+    private func coverageNotice(_ tokenScanHealth: TokenScanHealthStatus) -> some View {
         HStack(spacing: 8) {
             if model.isLoading || model.isScanningTokenUsage {
                 ProgressView()
                     .controlSize(.small)
+            } else if tokenScanHealth.isWarning {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
             } else {
                 Image(systemName: "info.circle")
                     .foregroundStyle(.secondary)
             }
             Text(
                 model.isScanningTokenUsage
-                    ? "正在后台统计剩余会话，当前结果会在扫描完成后更新。"
-                    : "部分会话没有可读取的 Token 记录，因此不会按 0 计入平均值。"
+                    ? tokenScanHealth.text
+                    : tokenScanHealth.isWarning
+                        ? tokenScanHealth.text
+                        : "部分会话没有可读取的 Token 记录，因此不会按 0 计入平均值。"
             )
             .font(.callout)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(tokenScanHealth.isWarning ? Color.orange : Color.secondary)
             Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .background(
+            (tokenScanHealth.isWarning ? Color.orange : Color.accentColor).opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 10)
+        )
     }
 
     private var emptyState: some View {
