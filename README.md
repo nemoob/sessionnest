@@ -43,8 +43,12 @@ Codex conversations are never stored there and are not deleted.
   expirations from a dedicated main-window dashboard or the menu bar
 - Hover over or select a day in the Token trend chart to inspect its complete Token breakdown
 - Monitor session count and Token-statistics coverage from the menu bar
+- Reuse a persistent rollout discovery index and report cache, read, and failure diagnostics
+- Keep fine-grained Token events for 30 days while retaining complete daily totals for long-term
+  trends
 - Check GitHub Releases at most once every 24 hours and open the trusted release page when an
   update is available
+- Reduce background quota requests while macOS Low Power Mode is enabled
 - Choose whether SessionNest launches in the menu bar only or opens its main window
 - Follow the system appearance or choose a light or dark theme
 
@@ -75,9 +79,20 @@ integration. It reads session metadata through the local Codex App Server, scans
 read-only for Token usage, and stores only SessionNest-managed metadata and derived statistics in
 SQLite.
 
+Rollout discovery stores each file's path, size, modification time, and discovered parent-child
+session relationship in the local database. Unchanged files reuse that index instead of rereading
+their prefixes. Scan diagnostics report enumerated files, cache hits, metadata reads, bytes read,
+and failures.
+
 Quota-cycle Token usage remains a local statistic rather than a server billing measurement. It uses
 the Codex App Server's exact quota-cycle boundary to exclude local Token events that happened before
 a natural weekly reset or a reset-card use on the same day.
+
+The background quota timer still wakes every 10 minutes. It requests a new quota snapshot only when
+the previous result is stale; macOS Low Power Mode extends that threshold to 30 minutes. Full
+reloads and manual refreshes continue to update data without starting a duplicate background
+request. Low Power Mode also limits automatic full session scans to at most once per hour, while a
+manual refresh remains immediate.
 
 Project inference distinguishes Git projects, ordinary working directories, and Codex scratch
 workspaces shaped like `Codex/YYYY-MM-DD/<session>`. A scratch workspace is assigned to a Git
@@ -100,13 +115,15 @@ SessionNest stores favorites, collections, tags, inferred project caches, and To
 Appearance is stored in the app's local user defaults. Removing the database resets only
 SessionNest metadata; it does not delete Codex conversations.
 
-Project-classification cache changes use additive SQLite migrations. Existing cache rows are
-reanalyzed in the background after an inference-version change; favorites, collections, tags, and
-Token caches remain intact.
+Project-classification and rollout-discovery cache changes use additive SQLite migrations. Existing
+project cache rows are reanalyzed in the background after an inference-version change; favorites,
+collections, tags, and Token caches remain intact.
 
 Timestamped Token deltas are stored in an additive table while the original daily Token table stays
-unchanged and continues to be populated. Databases created by v0.1.2 can be upgraded in place, and
-v0.1.2 can ignore the additional table if the app is temporarily downgraded.
+unchanged and continues to be populated. Fine-grained deltas are retained for the latest 30 days;
+complete daily totals remain available for long-term trends. Pruning old detail does not modify
+Codex rollout files. Databases created by v0.1.2 can be upgraded in place, and v0.1.2 can ignore the
+additional tables if the app is temporarily downgraded.
 
 On first launch, if the SessionNest database does not exist but the former database at
 `~/Library/Application Support/Codex Sessions/manager.sqlite` does, SessionNest copies it with

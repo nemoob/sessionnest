@@ -45,6 +45,7 @@ struct QuotaDashboardView: View {
         .toolbar { toolbarContent }
         .task {
             await model.reloadIfStale()
+            // 模型统一应用低电量阈值和失败退避，额度页不会绕过后台节流策略。
             await model.refreshRateLimitsIfStale()
         }
     }

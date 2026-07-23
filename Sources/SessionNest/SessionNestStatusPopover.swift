@@ -691,75 +691,192 @@ struct SessionNestStatusPopover: View {
     }
 
     private var settings: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             Button {
+                // 返回概览时沿用同一弹框，不额外创建窗口。
                 page = .overview
             } label: {
                 Label("返回", systemImage: "chevron.left")
             }
 
-            Text("主题")
-                .font(.title2.weight(.semibold))
-            Text("选择 SessionNest 的显示主题。")
-                .foregroundStyle(.secondary)
+            // 仅设置内容滚动，让返回入口始终固定在弹框顶部。
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
 
-            Picker("主题", selection: $storedTheme) {
-                ForEach(AppTheme.allCases) { theme in
-                    Text(theme.displayName).tag(theme.rawValue)
-                }
-            }
-            .pickerStyle(.segmented)
+                    Text("主题")
+                        .font(.title2.weight(.semibold))
+                    Text("选择 SessionNest 的显示主题。")
+                        .foregroundStyle(.secondary)
 
-            Divider()
-
-            Text("启动")
-                .font(.title2.weight(.semibold))
-            Text("选择启动 SessionNest 时是否显示主窗口。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Toggle("启动时默认打开主窗口", isOn: $opensMainWindowOnLaunch)
-            Text("下次启动时生效")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Text("更新")
-                .font(.title2.weight(.semibold))
-            Text("每天最多连接 GitHub 检查一次，不会自动下载或安装应用。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Toggle(
-                "每天自动检查更新",
-                isOn: Binding(
-                    get: { updateChecker.automaticallyChecksForUpdates },
-                    set: { isEnabled in
-                        updateChecker.setAutomaticChecksEnabled(isEnabled)
-                        if isEnabled {
-                            Task { await updateChecker.check(.automatic) }
+                    Picker("主题", selection: $storedTheme) {
+                        ForEach(AppTheme.allCases) { theme in
+                            Text(theme.displayName).tag(theme.rawValue)
                         }
                     }
-                )
-            )
+                    .pickerStyle(.segmented)
 
-            HStack(spacing: 10) {
-                Button("立即检查") {
-                    Task { await updateChecker.check(.manual) }
-                }
-                .disabled(updateChecker.state.isChecking)
+                    Divider()
 
-                if let status = AppUpdateSettingsStatus.resolve(updateChecker.state) {
-                    Text(status.text)
+                    Text("启动")
+                        .font(.title2.weight(.semibold))
+                    Text("选择启动 SessionNest 时是否显示主窗口。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+
+                    Toggle("启动时默认打开主窗口", isOn: $opensMainWindowOnLaunch)
+                    Text("下次启动时生效")
                         .font(.caption)
-                        .foregroundStyle(status.isError ? Color.red : Color.secondary)
+                        .foregroundStyle(.secondary)
+
+                    Divider()
+
+                    Text("更新")
+                        .font(.title2.weight(.semibold))
+                    Text("每天最多连接 GitHub 检查一次，不会自动下载或安装应用。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+
+                    Toggle(
+                        "每天自动检查更新",
+                        isOn: Binding(
+                            get: { updateChecker.automaticallyChecksForUpdates },
+                            set: { isEnabled in
+                                // 保存用户选择，让下次启动继续采用相同更新策略。
+                                updateChecker.setAutomaticChecksEnabled(isEnabled)
+                                if isEnabled {
+                                    // 用户重新启用后立即尝试一次受每日频率限制的自动检查。
+                                    Task { await updateChecker.check(.automatic) }
+                                }
+                            }
+                        )
+                    )
+
+                    HStack(spacing: 10) {
+                        Button("立即检查") {
+                            // 手动检查不等待其他设置交互，异步更新现有状态提示。
+                            Task { await updateChecker.check(.manual) }
+                        }
+                        .disabled(updateChecker.state.isChecking)
+
+                        if let status = AppUpdateSettingsStatus.resolve(updateChecker.state) {
+                            Text(status.text)
+                                .font(.caption)
+                                .foregroundStyle(status.isError ? Color.red : Color.secondary)
+                        }
+                    }
+
+                    Divider()
+
+                    scanDiagnosticsSection
                 }
+                // 为滚动条保留与概览页相同的尾部间距，避免文字被遮挡。
+                .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            // 把滚动条移到弹框边缘，同时保留内容自身的安全间距。
+            .padding(.trailing, -SessionNestStatusPopoverLayout.scrollViewTrailingExtension)
+        }
+    }
+
+    private var scanDiagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("扫描诊断")
+                .font(.title2.weight(.semibold))
+
+            if let diagnostics = model.tokenScanDiagnostics {
+                LabeledContent("最近完成") {
+                    Text(
+                        diagnostics.completedAt,
+                        format: .dateTime
+                            .year().month().day()
+                            .hour().minute().second()
+                    )
+                    .monospacedDigit()
+                }
+                diagnosticRow(
+                    title: "扫描耗时",
+                    value: diagnosticDuration(diagnostics.duration)
+                )
+                diagnosticRow(
+                    title: "发现索引命中",
+                    value:
+                        "\(diagnostics.discoveryCacheHitCount) / "
+                        + "\(diagnostics.discoveryEnumeratedFileCount)"
+                )
+                diagnosticRow(
+                    title: "发现实际读取",
+                    value:
+                        "\(diagnostics.discoveryReadFileCount) 个 · "
+                        + diagnosticByteCount(diagnostics.discoveryReadBytes)
+                )
+                diagnosticRow(
+                    title: "发现读取失败",
+                    value: "\(diagnostics.discoveryFailedReadCount) 个"
+                )
+                diagnosticRow(
+                    title: "索引存储",
+                    value: diagnostics.discoveryCacheStoreFailed ? "失败，将在下次重试" : "正常"
+                )
+                diagnosticRow(
+                    title: "Token 缓存复用",
+                    value:
+                        "\(diagnostics.tokenCacheReuseCount) / "
+                        + "\(diagnostics.targetCount) 个目标"
+                )
+                diagnosticRow(
+                    title: "Token 实际读取",
+                    value:
+                        "\(diagnostics.tokenReadFileCount) 个 · "
+                        + diagnosticByteCount(diagnostics.tokenReadBytes)
+                )
+                diagnosticRow(
+                    title: "扫描失败",
+                    value: "\(diagnostics.failedTargetCount) 个"
+                )
+                diagnosticRow(
+                    title: "清理细粒度明细",
+                    value: "\(diagnostics.prunedTimedRowCount) 行"
+                )
+            } else {
+                Text("尚无完整扫描记录")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
-            Spacer()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("细粒度明细保留最近 30 天，日汇总长期保留")
+                Text("低电量模式自动会话扫描最多每小时一次，手动刷新不受影响")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .font(.callout)
+    }
+
+    private func diagnosticRow(title: String, value: String) -> some View {
+        LabeledContent(title) {
+            Text(value)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+    }
+
+    private func diagnosticDuration(_ duration: TimeInterval) -> String {
+        // 防御异常负值，避免诊断界面出现无意义的负耗时。
+        let duration = max(0, duration)
+        if duration < 1 {
+            // 小于一秒时用毫秒显示，方便观察缓存命中后的短扫描。
+            return "\(Int((duration * 1_000).rounded())) 毫秒"
+        }
+        // 较长扫描保留一位小数，在紧凑弹框内兼顾精度和可读性。
+        let seconds = duration.formatted(.number.precision(.fractionLength(1)))
+        return "\(seconds) 秒"
+    }
+
+    private func diagnosticByteCount(_ bytes: Int64) -> String {
+        // 防御异常负值，并用系统文件大小格式适配 KB、MB 与 GB。
+        ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
     }
 
     private func updateNoticeBanner(_ notice: AppUpdateNotice) -> some View {

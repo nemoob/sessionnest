@@ -54,6 +54,26 @@ enum SessionNestQuotaRefreshSchedule {
     static let tolerance: TimeInterval = 60
 }
 
+enum SessionNestAutomaticQuotaRefreshPolicy {
+    // 低电量模式减少后台额度请求，把有效期从十分钟放宽到三十分钟。
+    static let lowPowerMaximumAge: TimeInterval = 30 * 60
+
+    static func maximumAge(
+        requestedMaximumAge: TimeInterval = SessionNestQuotaRefreshSchedule.interval,
+        isLowPowerModeEnabled: Bool
+    ) -> TimeInterval {
+        // 正常模式完全沿用调用方阈值，便于测试和特定自动入口明确控制。
+        guard isLowPowerModeEnabled else { return requestedMaximumAge }
+        // 低电量只延长较短阈值，不能反向加快调用方原本更慢的周期。
+        return max(requestedMaximumAge, lowPowerMaximumAge)
+    }
+
+    static func shouldRefresh(isLoading: Bool) -> Bool {
+        // 完整加载已经会取得额度，加载期间跳过定时请求避免重复工作。
+        !isLoading
+    }
+}
+
 struct StatusPopoverStatisticsScope {
     let snapshot: StatisticsSnapshot
     let title: String
@@ -130,8 +150,18 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
             timeInterval: SessionNestQuotaRefreshSchedule.interval,
             repeats: true
         ) { [weak self] _ in
+            // 定时器只负责唤醒，额度状态仍统一在主线程模型中更新。
             Task { @MainActor [weak self] in
-                await self?.model?.refreshRateLimits()
+                // 控制器或模型已经释放时不再启动后台工作。
+                guard let model = self?.model else { return }
+                // 加载期间完整刷新已经包含额度读取，避免并发发起重复请求。
+                guard
+                    SessionNestAutomaticQuotaRefreshPolicy.shouldRefresh(
+                        isLoading: model.isLoading
+                    )
+                else { return }
+                // 模型统一读取电源状态和失败退避，避免不同自动入口采用不同阈值。
+                await model.refreshRateLimitsIfStale()
             }
         }
         timer.tolerance = SessionNestQuotaRefreshSchedule.tolerance
@@ -330,8 +360,11 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
             popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
             startOutsideClickMonitoring()
             Task {
-                await model.refreshRateLimits()
+                // 先刷新过期会话；完整 reload 已包含额度读取，避免随后重复请求。
                 await model.reloadIfStale()
+                // 模型统一判断快照或最近尝试是否过期，完整 reload 失败也不会立即重试。
+                await model.refreshRateLimitsIfStale()
+                // 会话与额度状态稳定后再执行每日更新检查，避免影响首屏数据刷新。
                 await updateChecker.check(.automatic)
             }
         }

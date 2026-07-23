@@ -274,7 +274,8 @@ struct StatisticsDashboardView: View {
                 Label("刷新", systemImage: "arrow.clockwise")
             }
             .help("刷新会话与 Token 统计")
-            .disabled(model.isLoading)
+            // Token 扫描尚未完成时禁止重新加载，避免取消并重启同一批日志工作。
+            .disabled(model.isLoading || model.isScanningTokenUsage)
         }
     }
 

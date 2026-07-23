@@ -171,6 +171,26 @@ import Testing
     #expect(SessionNestQuotaRefreshSchedule.tolerance == 60)
 }
 
+@Test func automaticQuotaRefreshPolicyExtendsMaximumAgeOnlyInLowPowerMode() {
+    // 正常供电时保持既有十分钟额度有效期，不提高后台请求频率。
+    #expect(
+        SessionNestAutomaticQuotaRefreshPolicy.maximumAge(isLowPowerModeEnabled: false)
+            == 10 * 60
+    )
+    // 低电量模式把实际额度请求间隔放宽到三十分钟。
+    #expect(
+        SessionNestAutomaticQuotaRefreshPolicy.maximumAge(isLowPowerModeEnabled: true)
+            == 30 * 60
+    )
+}
+
+@Test func automaticQuotaRefreshPolicySkipsOnlyWhileFullLoadIsRunning() {
+    // 完整加载期间应由 reload 统一读取额度，定时器不得重复请求。
+    #expect(!SessionNestAutomaticQuotaRefreshPolicy.shouldRefresh(isLoading: true))
+    // 加载完成后允许既有定时器按快照有效期决定是否刷新。
+    #expect(SessionNestAutomaticQuotaRefreshPolicy.shouldRefresh(isLoading: false))
+}
+
 @Test func statusPopoverStatisticsScopePrefersQuotaCycleAndLabelsFallback() {
     let cycle = StatisticsSnapshot(
         totalUsage: .zero,

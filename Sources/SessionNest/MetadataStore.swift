@@ -234,6 +234,147 @@ actor MetadataStore {
         }
     }
 
+    func loadTokenDiscoveryCache() throws -> [String: TokenDiscoveryCacheEntry] {
+        // 发现缓存以日志路径为主键，允许在尚未解析出会话 ID 时复用文件检查结果。
+        let statement = try prepare(
+            """
+            SELECT rollout_path, file_size, file_mtime_ns, subagent_id,
+                   parent_thread_id, parser_version
+            FROM token_discovery_cache
+            """
+        )
+        // 查询结束后统一释放 SQLite 语句资源。
+        defer { sqlite3_finalize(statement) }
+
+        // 返回字典便于目录枚举按路径进行常数时间命中判断。
+        var cache: [String: TokenDiscoveryCacheEntry] = [:]
+        // 持续读取全部缓存行，直到 SQLite 明确返回完成状态。
+        while true {
+            // 每次 step 只处理一行或结束状态，异常状态直接向上抛出。
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                // 路径同时作为缓存记录内容和返回字典的稳定键。
+                let rolloutPath = text(at: 0, in: statement)
+                // 可空的子代理和父会话字段共同表达正缓存；两者为空表达负缓存。
+                cache[rolloutPath] = TokenDiscoveryCacheEntry(
+                    rolloutPath: rolloutPath,
+                    fileSize: sqlite3_column_int64(statement, 1),
+                    fileModificationTimeNS: sqlite3_column_int64(statement, 2),
+                    subagentID: optionalText(at: 3, in: statement),
+                    parentThreadID: optionalText(at: 4, in: statement),
+                    parserVersion: sqlite3_column_int64(statement, 5)
+                )
+            case SQLITE_DONE:
+                // 完整读取后一次性返回，避免调用方看到半份缓存。
+                return cache
+            default:
+                // 保留 SQLite 原始错误信息，便于定位数据库损坏或语句问题。
+                throw sqliteError()
+            }
+        }
+    }
+
+    func updateTokenDiscoveryCache(
+        changedEntries: [TokenDiscoveryCacheEntry],
+        removedPaths: Set<String>
+    ) throws {
+        // 没有变更时不启动事务，避免温刷新产生无意义的数据库写入和唤醒。
+        guard !changedEntries.isEmpty || !removedPaths.isEmpty else { return }
+
+        // 删除和写入必须原子完成，保证下次扫描不会读取到半更新索引。
+        try execute("BEGIN")
+        do {
+            // 仅在存在已消失文件时准备删除语句，减少纯更新场景的 SQLite 工作。
+            if !removedPaths.isEmpty {
+                // 预编译一次删除语句，并在循环中复用绑定槽位。
+                let deleteStatement = try prepare(
+                    "DELETE FROM token_discovery_cache WHERE rollout_path = ?"
+                )
+                do {
+                    // 路径集合天然去重，确保每个失效缓存最多删除一次。
+                    for rolloutPath in removedPaths {
+                        // 清理上一次执行状态和参数，避免路径绑定在循环间串用。
+                        guard sqlite3_reset(deleteStatement) == SQLITE_OK,
+                            sqlite3_clear_bindings(deleteStatement) == SQLITE_OK
+                        else {
+                            throw sqliteError()
+                        }
+                        // 使用参数绑定删除指定日志路径，避免路径字符影响 SQL。
+                        try bind(rolloutPath, to: 1, in: deleteStatement)
+                        // 单条删除完成后再处理下一路径，任一失败都会回滚整个批次。
+                        try finish(deleteStatement)
+                    }
+                } catch {
+                    // 异常路径也必须释放已准备的删除语句。
+                    sqlite3_finalize(deleteStatement)
+                    throw error
+                }
+                // 正常完成批量删除后释放语句资源。
+                sqlite3_finalize(deleteStatement)
+            }
+
+            // 仅在存在新增或变化文件时准备 UPSERT 语句。
+            if !changedEntries.isEmpty {
+                // 路径冲突时覆盖全部判定字段，使文件变化和解析器升级立即生效。
+                let upsertStatement = try prepare(
+                    """
+                    INSERT INTO token_discovery_cache (
+                      rollout_path, file_size, file_mtime_ns, subagent_id,
+                      parent_thread_id, parser_version
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(rollout_path) DO UPDATE SET
+                      file_size = excluded.file_size,
+                      file_mtime_ns = excluded.file_mtime_ns,
+                      subagent_id = excluded.subagent_id,
+                      parent_thread_id = excluded.parent_thread_id,
+                      parser_version = excluded.parser_version
+                    """
+                )
+                do {
+                    // 按发现结果逐条更新，正缓存与字段为空的负缓存使用同一写入路径。
+                    for entry in changedEntries {
+                        // 清理上一次执行状态和参数，确保可空字段不会残留旧值。
+                        guard sqlite3_reset(upsertStatement) == SQLITE_OK,
+                            sqlite3_clear_bindings(upsertStatement) == SQLITE_OK
+                        else {
+                            throw sqliteError()
+                        }
+                        // 路径作为稳定主键，决定本行是新增还是覆盖。
+                        try bind(entry.rolloutPath, to: 1, in: upsertStatement)
+                        // 文件大小用于发现层快速判断日志是否变化。
+                        try bind(entry.fileSize, to: 2, in: upsertStatement)
+                        // 纳秒修改时间与大小共同降低内容变化漏判概率。
+                        try bind(entry.fileModificationTimeNS, to: 3, in: upsertStatement)
+                        // 子代理字段为空时持久化为 NULL，明确表示负缓存。
+                        try bind(entry.subagentID, to: 4, in: upsertStatement)
+                        // 父会话字段与子代理字段同步持久化，恢复完整归属关系。
+                        try bind(entry.parentThreadID, to: 5, in: upsertStatement)
+                        // 解析器版本变化会使旧缓存失效，因此必须随记录保存。
+                        try bind(entry.parserVersion, to: 6, in: upsertStatement)
+                        // 完成本行 UPSERT；任一失败都会回滚删除和其他写入。
+                        try finish(upsertStatement)
+                    }
+                } catch {
+                    // 异常路径也必须释放已准备的 UPSERT 语句。
+                    sqlite3_finalize(upsertStatement)
+                    throw error
+                }
+                // 正常完成批量写入后释放语句资源。
+                sqlite3_finalize(upsertStatement)
+            }
+
+            // 删除与写入全部成功后提交，向后续扫描一次性公开新索引。
+            try execute("COMMIT")
+        } catch {
+            // 保存原始事务错误，避免回滚失败覆盖真正的写入原因。
+            let transactionError = error
+            // 尽力回滚本轮修改，使之前已提交的缓存继续保持可用。
+            try? execute("ROLLBACK")
+            // 将最初的读写错误交给调用方处理或降级。
+            throw transactionError
+        }
+    }
+
     func loadThreadTokenDailyUsage() throws -> [ThreadTokenDailyUsage] {
         let statement = try prepare(
             """
@@ -279,7 +420,6 @@ actor MetadataStore {
                    output_tokens, reasoning_output_tokens, total_tokens
             FROM thread_token_timed
             WHERE event_at >= ? AND event_at <= ?
-            ORDER BY thread_id, event_at
             """
         )
         defer { sqlite3_finalize(statement) }
@@ -308,6 +448,19 @@ actor MetadataStore {
                 throw sqliteError()
             }
         }
+    }
+
+    func pruneThreadTokenTimedUsage(before cutoff: Int64) throws -> Int {
+        // 秒级明细只承担近期精确统计，按传入边界删除更早记录。
+        let statement = try prepare("DELETE FROM thread_token_timed WHERE event_at < ?")
+        // 无论删除成功或失败都释放 SQLite 语句资源。
+        defer { sqlite3_finalize(statement) }
+        // 将保留边界绑定到参数，避免把时间值拼进 SQL。
+        try bind(cutoff, to: 1, in: statement)
+        // 单条 DELETE 由 SQLite 原子执行，失败时直接向上抛错。
+        try finish(statement)
+        // 返回本次实际删除行数，供上层记录清理效果和跳过无变化场景。
+        return Int(sqlite3_changes(database))
     }
 
     func saveThreadProject(_ project: ThreadProjectCache) throws {
@@ -356,7 +509,8 @@ actor MetadataStore {
         fileModificationTimeNS: Int64,
         parserVersion: Int64,
         result: TokenScanResult,
-        rebuild: Bool
+        rebuild: Bool,
+        timedUsageCutoff: Int64? = nil
     ) throws {
         guard result.observedCheckpoint || rebuild else { return }
 
@@ -464,14 +618,24 @@ actor MetadataStore {
             )
             do {
                 for (eventAt, usage) in result.timedUsage where !usage.isZero {
+                    // 重扫可能重新产出全部历史事件，只写入保留边界内的秒级明细。
+                    if let timedUsageCutoff, eventAt < timedUsageCutoff {
+                        // 日汇总已在上方完整保存，过期秒级记录可以安全跳过。
+                        continue
+                    }
+                    // 复用预编译语句前清理上一次循环的执行状态和绑定值。
                     guard sqlite3_reset(timedStatement) == SQLITE_OK,
                         sqlite3_clear_bindings(timedStatement) == SQLITE_OK
                     else {
                         throw sqliteError()
                     }
+                    // 秒级明细继续归属原始日志目标，后续统计再处理父子会话归属。
                     try bind(threadID, to: 1, in: timedStatement)
+                    // 保留原始事件秒级时间，确保额度周期边界可以精确过滤。
                     try bind(eventAt, to: 2, in: timedStatement)
+                    // 一次写入所有 Token 分量，保持日汇总与秒级明细口径一致。
                     try bind(usage, startingAt: 3, in: timedStatement)
+                    // 完成本行写入；相同会话和秒的增量由 UPSERT 累加。
                     try finish(timedStatement)
                 }
             } catch {
@@ -661,6 +825,14 @@ actor MetadataStore {
             );
             CREATE INDEX IF NOT EXISTS thread_token_timed_event_at
               ON thread_token_timed(event_at);
+            CREATE TABLE IF NOT EXISTS token_discovery_cache (
+              rollout_path TEXT PRIMARY KEY,
+              file_size INTEGER NOT NULL,
+              file_mtime_ns INTEGER NOT NULL,
+              subagent_id TEXT,
+              parent_thread_id TEXT,
+              parser_version INTEGER NOT NULL
+            );
             """
         guard sqlite3_exec(database, schema, nil, nil, nil) == SQLITE_OK else {
             throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
@@ -747,6 +919,16 @@ actor MetadataStore {
 
     private func bind(_ value: String, to index: Int32, in statement: OpaquePointer) throws {
         guard sqlite3_bind_text(statement, index, value, -1, sqliteTransient) == SQLITE_OK else {
+            throw sqliteError()
+        }
+    }
+
+    private func bind(_ value: String?, to index: Int32, in statement: OpaquePointer) throws {
+        // 非空文本沿用统一的瞬时绑定策略，确保 Swift 字符串生命周期安全。
+        if let value {
+            try bind(value, to: index, in: statement)
+        } else if sqlite3_bind_null(statement, index) != SQLITE_OK {
+            // 空值必须显式绑定 NULL，失败时保留 SQLite 错误上下文。
             throw sqliteError()
         }
     }

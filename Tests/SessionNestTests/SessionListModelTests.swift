@@ -36,6 +36,69 @@ import Testing
     )
 }
 
+@Test func automaticSessionRefreshUsesHourlyMinimumOnlyInLowPowerMode() {
+    // 正常供电保留默认 15 分钟完整刷新周期。
+    #expect(
+        SessionNestAutomaticSessionRefreshPolicy.maximumAge(
+            requestedMaximumAge: 15 * 60,
+            isLowPowerModeEnabled: false
+        ) == 15 * 60
+    )
+    // 低电量把较短的自动周期放宽到一小时。
+    #expect(
+        SessionNestAutomaticSessionRefreshPolicy.maximumAge(
+            requestedMaximumAge: 15 * 60,
+            isLowPowerModeEnabled: true
+        ) == 60 * 60
+    )
+    // 调用方本来要求更慢时不能被低电量策略反向加快。
+    #expect(
+        SessionNestAutomaticSessionRefreshPolicy.maximumAge(
+            requestedMaximumAge: 2 * 60 * 60,
+            isLowPowerModeEnabled: true
+        ) == 2 * 60 * 60
+    )
+}
+
+@Test func timedTokenRetentionUsesThirtyInclusiveLocalCalendarDays() throws {
+    // 固定上海时区验证自然日边界，不依赖执行测试的机器设置。
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(identifier: "Asia/Shanghai"))
+    // 7 月 23 日的 30 天含当天窗口应从 6 月 24 日零点开始。
+    let now = try #require(
+        calendar.date(
+            from: DateComponents(year: 2026, month: 7, day: 23, hour: 16, minute: 30)
+        ))
+    let expectedCutoff = try #require(
+        calendar.date(from: DateComponents(year: 2026, month: 6, day: 24)))
+    let cutoff = TokenTimedRetentionPolicy.cutoff(now: now, calendar: calendar)
+
+    // 边界采用本地自然日并包含整整 30 天。
+    #expect(cutoff == Int64(expectedCutoff.timeIntervalSince1970))
+    // 边界内查询可准确表示，早一秒则必须拒绝部分统计。
+    #expect(TokenTimedRetentionPolicy.canRepresentExactRange(startingAt: cutoff, cutoff: cutoff))
+    #expect(
+        !TokenTimedRetentionPolicy.canRepresentExactRange(
+            startingAt: cutoff - 1,
+            cutoff: cutoff
+        ))
+    // 清理首次执行，同一天跳过，下一自然日恢复执行。
+    #expect(TokenTimedRetentionPolicy.shouldPrune(lastPrunedAt: nil, now: now, calendar: calendar))
+    #expect(
+        !TokenTimedRetentionPolicy.shouldPrune(
+            lastPrunedAt: now.addingTimeInterval(-60),
+            now: now,
+            calendar: calendar
+        ))
+    let nextDay = try #require(calendar.date(byAdding: .day, value: 1, to: now))
+    #expect(
+        TokenTimedRetentionPolicy.shouldPrune(
+            lastPrunedAt: now,
+            now: nextDay,
+            calendar: calendar
+        ))
+}
+
 @MainActor
 @Test func automaticReloadCoalescesWithManualReloadInFlight() async throws {
     let fixture = try SessionModelFixture(threadID: "reload-coalescing", createRollout: false)
@@ -212,15 +275,96 @@ import Testing
     await model.refreshRateLimits(now: firstRefresh)
     await model.refreshRateLimitsIfStale(
         now: firstRefresh.addingTimeInterval(599),
-        maximumAge: 600
+        maximumAge: 600,
+        isLowPowerModeEnabled: false
     )
     #expect(await probe.callCount == 1)
 
     await model.refreshRateLimitsIfStale(
         now: firstRefresh.addingTimeInterval(600),
-        maximumAge: 600
+        maximumAge: 600,
+        isLowPowerModeEnabled: false
     )
     #expect(await probe.callCount == 2)
+}
+
+@MainActor
+@Test func automaticRateLimitRefreshBacksOffFromFailedAttempt() async throws {
+    // 构造始终失败的额度请求，验证自动入口不会因没有成功时间而频繁重试。
+    let fixture = try SessionModelFixture(
+        threadID: "rate-limit-failure-backoff",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let probe = RateLimitRefreshProbe(
+        snapshot: try weeklyRateLimitSnapshot(usedPercent: 6)
+    )
+    await probe.failSubsequentLoads()
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        rateLimitRefreshOperation: { try await probe.load() }
+    )
+    let firstAttempt = Date(timeIntervalSinceReferenceDate: 20_000)
+
+    // 首次没有成功或尝试记录，自动入口应发起请求并记录失败时间。
+    await model.refreshRateLimitsIfStale(
+        now: firstAttempt,
+        maximumAge: 1_800,
+        isLowPowerModeEnabled: true
+    )
+    #expect(await probe.callCount == 1)
+    #expect(model.lastSuccessfulUsageRefreshAt == nil)
+    #expect(model.lastUsageRefreshAttemptAt == firstAttempt)
+
+    // 低电量 30 分钟窗口内再次打开界面应跳过重复请求。
+    await model.refreshRateLimitsIfStale(
+        now: firstAttempt.addingTimeInterval(1_799),
+        maximumAge: 600,
+        isLowPowerModeEnabled: true
+    )
+    #expect(await probe.callCount == 1)
+
+    // 到达 30 分钟边界后允许下一次自动重试。
+    await model.refreshRateLimitsIfStale(
+        now: firstAttempt.addingTimeInterval(1_800),
+        maximumAge: 600,
+        isLowPowerModeEnabled: true
+    )
+    #expect(await probe.callCount == 2)
+}
+
+@MainActor
+@Test func failedFullReloadDoesNotImmediatelyRetryUsageRequest() async throws {
+    // 完整 reload 的额度读取失败后，状态栏紧接着的轻量自动入口必须共享退避记录。
+    let fixture = try SessionModelFixture(
+        threadID: "reload-rate-limit-backoff",
+        createRollout: false
+    )
+    defer { fixture.remove() }
+    let probe = RateLimitRefreshProbe(
+        snapshot: try weeklyRateLimitSnapshot(usedPercent: 6)
+    )
+    await probe.failSubsequentLoads()
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        rateLimitRefreshOperation: { try await probe.load() },
+        threadReloadOperation: { ([fixture.thread], []) }
+    )
+
+    // reload 已尝试一次额度请求，并保存该尝试时间。
+    await model.reload()
+    let attemptedAt = try #require(model.lastUsageRefreshAttemptAt)
+    #expect(await probe.callCount == 1)
+
+    // 模拟弹框随后执行的自动轻量刷新，十分钟内不能马上发出第二次请求。
+    await model.refreshRateLimitsIfStale(
+        now: attemptedAt.addingTimeInterval(1),
+        maximumAge: 600,
+        isLowPowerModeEnabled: false
+    )
+    #expect(await probe.callCount == 1)
 }
 
 @MainActor
@@ -935,6 +1079,87 @@ import Testing
     #expect(model.tokenScanHealth.freshCount == 1)
     #expect(model.tokenScanHealth.staleCount == 0)
     #expect(model.tokenScanHealth.failedCount == 0)
+}
+
+@MainActor
+@Test func completedTokenScanPublishesActualIOAndPrunesExpiredTimedRows() async throws {
+    // 创建一个 10 字节目标文件，让诊断可以验证真实正文读取字节。
+    let fixture = try SessionModelFixture(threadID: "diagnostics", createRollout: true)
+    defer { fixture.remove() }
+    let rolloutURL = URL(fileURLWithPath: fixture.thread.path!)
+    try Data(repeating: 1, count: 10).write(to: rolloutURL)
+
+    // 先为其他线程写入一条刚好位于 30 天边界之前的历史秒级明细。
+    let cutoff = TokenTimedRetentionPolicy.cutoff(now: Date(), calendar: .current)
+    let expiredEvent = cutoff - 1
+    let expiredUsage = TokenUsageBreakdown(
+        inputTokens: 8,
+        cachedInputTokens: 4,
+        outputTokens: 2,
+        reasoningOutputTokens: 1,
+        totalTokens: 10
+    )
+    try await fixture.store.saveThreadTokenScan(
+        threadID: "expired",
+        rolloutPath: "/expired.jsonl",
+        fileSize: 1,
+        fileModificationTimeNS: 1,
+        parserVersion: 3,
+        result: TokenScanResult(
+            offset: 1,
+            state: TokenScanState(
+                maximum: expiredUsage,
+                dailyUsage: [:],
+                timedUsage: [expiredEvent: expiredUsage],
+                latestEventTimestamp: expiredEvent,
+                observedCheckpoint: true
+            )
+        ),
+        rebuild: true
+    )
+
+    // 注入稳定目标和固定偏移结果，使测试不依赖真实 JSONL 解析内容。
+    let target = TokenScanTarget(
+        id: fixture.thread.id,
+        attributionThreadID: fixture.thread.id,
+        url: rolloutURL
+    )
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        tokenScanOperation: { _, _, _, _ in
+            TokenScanResult(
+                offset: 0,
+                state: TokenScanState(
+                    maximum: expiredUsage,
+                    dailyUsage: [:],
+                    latestEventTimestamp: Int64(Date().timeIntervalSince1970),
+                    observedCheckpoint: true
+                )
+            )
+        },
+        tokenScanTargetDiscoveryOperation: { _ in [target] },
+        threadReloadOperation: { ([fixture.thread], []) }
+    )
+
+    // 完成一轮扫描后再读取诊断和数据库，避免断言中间状态。
+    await model.reload()
+    try await waitForTokenCondition { !model.isScanningTokenUsage }
+    let diagnostics = try #require(model.tokenScanDiagnostics)
+
+    // 目标实际执行一次全量扫描；未换行尾段不进入 offset，但仍应计入读取字节。
+    #expect(diagnostics.targetCount == 1)
+    #expect(diagnostics.tokenReadFileCount == 1)
+    #expect(diagnostics.tokenReadBytes == 10)
+    #expect(diagnostics.tokenCacheReuseCount == 0)
+    // 首轮每日清理应删除预置的唯一过期秒级明细。
+    #expect(diagnostics.prunedTimedRowCount == 1)
+    #expect(
+        try await fixture.store.loadThreadTokenTimedUsage(
+            startingAt: expiredEvent,
+            endingAt: expiredEvent
+        ).isEmpty
+    )
 }
 
 @MainActor

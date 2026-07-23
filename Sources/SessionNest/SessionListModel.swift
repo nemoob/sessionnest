@@ -13,6 +13,39 @@ typealias ThreadReloadOperation = @Sendable () async throws -> ([CodexThread], [
 typealias RateLimitRefreshOperation = @Sendable () async throws -> CodexRateLimitSnapshot
 typealias UsageRefreshOperation = @Sendable () async throws -> CodexUsageSnapshot
 typealias TokenScanTargetDiscoveryOperation = @Sendable ([CodexThread]) async -> [TokenScanTarget]
+private typealias IndexedTokenScanTargetDiscoveryOperation =
+    @Sendable ([CodexThread]) async -> TokenDiscoveryResult
+
+struct TokenScanDiagnostics: Equatable, Sendable {
+    // 最近完成时间只在整轮扫描成功发布时更新，取消任务不会覆盖旧诊断。
+    let completedAt: Date
+    // 耗时覆盖目录发现、Token 扫描、存储和最终读取的完整链路。
+    let duration: TimeInterval
+    // 目录枚举数量是发现索引本轮检查的 JSONL 总基数。
+    let discoveryEnumeratedFileCount: Int
+    // 发现缓存命中数量反映无需读取日志头的文件数。
+    let discoveryCacheHitCount: Int
+    // 发现实际读取数量只统计打开并检查日志头的文件。
+    let discoveryReadFileCount: Int
+    // 发现读取字节按真实进入内存的前缀字节累计。
+    let discoveryReadBytes: Int64
+    // 发现读取失败数量用于识别权限或瞬时文件系统问题。
+    let discoveryFailedReadCount: Int
+    // 索引存储失败会导致后续刷新退化为冷发现，需要在诊断中明确提示。
+    let discoveryCacheStoreFailed: Bool
+    // 扫描目标包含可见会话日志及其可归属的子代理日志。
+    let targetCount: Int
+    // Token 缓存复用数量表示正文完全没有重新读取的目标。
+    let tokenCacheReuseCount: Int
+    // Token 实际读取数量包含增量和全量正文扫描。
+    let tokenReadFileCount: Int
+    // Token 读取字节使用扫描结果偏移与起始偏移之差计算。
+    let tokenReadBytes: Int64
+    // 失败目标数量与覆盖健康状态保持一致。
+    let failedTargetCount: Int
+    // 清理行数用于确认 30 天细粒度保留策略实际执行。
+    let prunedTimedRowCount: Int
+}
 
 enum SidebarSelection: Hashable {
     case quota
@@ -461,6 +494,53 @@ enum SessionRefreshPolicy {
     }
 }
 
+enum SessionNestAutomaticSessionRefreshPolicy {
+    // 低电量时完整会话扫描最多每小时一次，减少目录和数据库活动。
+    static let lowPowerMinimumAge: TimeInterval = 60 * 60
+
+    static func maximumAge(
+        requestedMaximumAge: TimeInterval,
+        isLowPowerModeEnabled: Bool
+    ) -> TimeInterval {
+        // 正常供电时完全沿用调用方设定的刷新周期。
+        guard isLowPowerModeEnabled else { return requestedMaximumAge }
+        // 低电量模式只延长自动刷新，不改变手动 reload 的行为。
+        return max(requestedMaximumAge, lowPowerMinimumAge)
+    }
+}
+
+enum TokenTimedRetentionPolicy {
+    // 当天也计入保留窗口，因此 30 个本地自然日向前偏移 29 天。
+    static let retainedDayCount = 30
+
+    static func cutoff(now: Date, calendar: Calendar) -> Int64 {
+        // 先落到本地自然日零点，避免固定秒数在夏令时切换时偏移日期。
+        let today = calendar.startOfDay(for: now)
+        // Calendar 按自然日回退，极端失败时保守退回当天而不是误留无限数据。
+        let firstRetainedDay =
+            calendar.date(byAdding: .day, value: -(retainedDayCount - 1), to: today)
+            ?? today
+        // SQLite 使用秒级 Unix 时间作为 timed 明细边界。
+        return Int64(firstRetainedDay.timeIntervalSince1970)
+    }
+
+    static func shouldPrune(
+        lastPrunedAt: Date?,
+        now: Date,
+        calendar: Calendar
+    ) -> Bool {
+        // 首次运行必须执行一次清理，处理旧版本累积的历史明细。
+        guard let lastPrunedAt else { return true }
+        // 同一自然日内只清理一次，避免每轮扫描重复 DELETE。
+        return !calendar.isDate(lastPrunedAt, inSameDayAs: now)
+    }
+
+    static func canRepresentExactRange(startingAt start: Int64, cutoff: Int64) -> Bool {
+        // 查询起点早于保留边界时不能把残缺数据冒充完整额度周期。
+        start >= cutoff
+    }
+}
+
 @MainActor
 final class SessionListModel: ObservableObject {
     @Published var activeThreads: [CodexThread] = []
@@ -476,12 +556,15 @@ final class SessionListModel: ObservableObject {
     @Published private(set) var tokenCoveredThreadIDs: Set<String> = []
     @Published private(set) var tokenAttributionThreadIDs: [String: String] = [:]
     @Published private(set) var tokenScanHealth = TokenScanHealth.empty
+    @Published private(set) var tokenScanDiagnostics: TokenScanDiagnostics?
     @Published private(set) var rateLimitSnapshot: CodexRateLimitSnapshot?
     @Published private(set) var resetCreditsSnapshot: CodexRateLimitResetCreditsSummary?
     @Published private(set) var accountSnapshot: CodexAccountSnapshot?
     @Published private(set) var quotaCycleStatisticsSnapshot: StatisticsSnapshot?
     @Published private(set) var lastSuccessfulReloadAt: Date?
     @Published private(set) var lastSuccessfulUsageRefreshAt: Date?
+    // 自动刷新同时参考最近尝试，失败后不会在每次界面打开时立即重试。
+    private(set) var lastUsageRefreshAttemptAt: Date?
     @Published var selection: SidebarSelection = .statistics
     @Published var selectedThreadID: String?
     @Published var query = ""
@@ -498,7 +581,7 @@ final class SessionListModel: ObservableObject {
     let store: MetadataStore
     private let usageRefreshOperation: UsageRefreshOperation
     private let tokenScanOperation: TokenScanOperation
-    private let tokenScanTargetDiscoveryOperation: TokenScanTargetDiscoveryOperation
+    private let tokenScanTargetDiscoveryOperation: IndexedTokenScanTargetDiscoveryOperation
     private let threadReloadOperation: ThreadReloadOperation?
     private let refreshesUsageDuringReload: Bool
     private var stateRevision = SessionStateRevision()
@@ -511,8 +594,11 @@ final class SessionListModel: ObservableObject {
     private var reloadTask: Task<Void, Never>?
     private var rateLimitRefreshTask: Task<Void, Never>?
     private var usageRefreshGeneration = 0
+    private var lastTimedUsagePruneAt: Date?
 
     private static let tokenParserVersion: Int64 = 3
+    // 发现闭包在 utility 任务执行，版本常量不依赖主 actor 状态。
+    nonisolated private static let tokenDiscoveryParserVersion: Int64 = 1
     static let automaticRefreshInterval: TimeInterval = 15 * 60
 
     var totalSessionCount: Int {
@@ -595,12 +681,52 @@ final class SessionListModel: ObservableObject {
             self.usageRefreshOperation = { try await client.readUsageSnapshot() }
         }
         self.tokenScanOperation = tokenScanOperation
-        self.tokenScanTargetDiscoveryOperation =
-            tokenScanTargetDiscoveryOperation ?? { threads in
-                await Task.detached(priority: .utility) {
-                    LocalTokenScanTargetDiscovery.discover(threads: threads)
-                }.value
+        if let tokenScanTargetDiscoveryOperation {
+            // 测试和定制调用继续接受旧的 targets-only 闭包，避免扩大公开注入接口。
+            self.tokenScanTargetDiscoveryOperation = { threads in
+                // 调用方自行提供目标时没有发现 I/O 指标，使用零值明确区分。
+                let targets = await tokenScanTargetDiscoveryOperation(threads)
+                // 返回完整结果形态，让扫描主流程只维护一条路径。
+                return TokenDiscoveryResult(
+                    targets: targets,
+                    changedCacheEntries: [],
+                    removedCachePaths: [],
+                    metrics: TokenDiscoveryMetrics(
+                        enumeratedJSONLCount: 0,
+                        cacheHitCount: 0,
+                        metadataReadFileCount: 0,
+                        metadataReadBytes: 0,
+                        failedReadCount: 0
+                    )
+                )
             }
+        } else {
+            // 默认发现从 SQLite 读取持久索引，热刷新无需重读全部日志头。
+            self.tokenScanTargetDiscoveryOperation = { [store] threads in
+                // 索引读取失败时退化为冷发现，不阻断 Token 统计主功能。
+                let cachedEntries: [String: TokenDiscoveryCacheEntry]
+                let cacheLoadFailed: Bool
+                do {
+                    // 正常读取持久索引，未变化文件只需比较元数据。
+                    cachedEntries = try await store.loadTokenDiscoveryCache()
+                    cacheLoadFailed = false
+                } catch {
+                    // 读取失败时退化为冷发现，并把原因带到扫描诊断。
+                    cachedEntries = [:]
+                    cacheLoadFailed = true
+                }
+                // 目录枚举和日志头读取放到 utility 任务，避免阻塞主线程。
+                let result = await Task.detached(priority: .utility) {
+                    LocalTokenScanTargetDiscovery.discoverIndexed(
+                        threads: threads,
+                        cacheEntries: cachedEntries,
+                        parserVersion: Self.tokenDiscoveryParserVersion
+                    )
+                }.value
+                // 读取失败状态随发现结果返回，持久化将在主流程代际校验后执行。
+                return cacheLoadFailed ? result.markingCacheStoreFailed() : result
+            }
+        }
         self.threadReloadOperation = threadReloadOperation
         refreshesUsageDuringReload =
             threadReloadOperation == nil
@@ -658,6 +784,8 @@ final class SessionListModel: ObservableObject {
             let usageGeneration: Int?
             let usageSnapshot: CodexUsageSnapshot?
             if refreshesUsageDuringReload {
+                // 完整 reload 读取额度也属于一次尝试，失败时同样进入自动退避周期。
+                lastUsageRefreshAttemptAt = Date()
                 let generation = beginUsageRefresh()
                 usageGeneration = generation
                 usageSnapshot = try? await usageRefreshOperation()
@@ -718,13 +846,19 @@ final class SessionListModel: ObservableObject {
 
     func reloadIfStale(
         now: Date = Date(),
-        maximumAge: TimeInterval = automaticRefreshInterval
+        maximumAge: TimeInterval = automaticRefreshInterval,
+        isLowPowerModeEnabled: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     ) async {
+        // 只有自动入口应用低电量延长策略，显式 reload 仍立即执行。
+        let effectiveMaximumAge = SessionNestAutomaticSessionRefreshPolicy.maximumAge(
+            requestedMaximumAge: maximumAge,
+            isLowPowerModeEnabled: isLowPowerModeEnabled
+        )
         guard
             SessionRefreshPolicy.shouldRefresh(
                 lastSuccessfulReloadAt: lastSuccessfulReloadAt,
                 now: now,
-                maximumAge: maximumAge
+                maximumAge: effectiveMaximumAge
             )
         else { return }
 
@@ -737,6 +871,8 @@ final class SessionListModel: ObservableObject {
             return
         }
 
+        // 手动或自动请求真正开始前记录尝试时间，失败也能抑制紧接着的重复请求。
+        lastUsageRefreshAttemptAt = now
         isRefreshingUsage = true
         let task = Task { [weak self] in
             guard let self else { return }
@@ -762,13 +898,23 @@ final class SessionListModel: ObservableObject {
 
     func refreshRateLimitsIfStale(
         now: Date = Date(),
-        maximumAge: TimeInterval = SessionNestQuotaRefreshSchedule.interval
+        maximumAge: TimeInterval = SessionNestQuotaRefreshSchedule.interval,
+        isLowPowerModeEnabled: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     ) async {
+        // 在模型层统一应用低电量阈值，状态栏和主窗口不会再出现策略遗漏。
+        let effectiveMaximumAge = SessionNestAutomaticQuotaRefreshPolicy.maximumAge(
+            requestedMaximumAge: maximumAge,
+            isLowPowerModeEnabled: isLowPowerModeEnabled
+        )
+        // 成功时间用于 UI，最近尝试时间用于失败退避；自动入口采用两者中较新的一个。
+        let freshnessReference = [lastSuccessfulUsageRefreshAt, lastUsageRefreshAttemptAt]
+            .compactMap { $0 }
+            .max()
         guard
             SessionRefreshPolicy.shouldRefresh(
-                lastSuccessfulReloadAt: lastSuccessfulUsageRefreshAt,
+                lastSuccessfulReloadAt: freshnessReference,
                 now: now,
-                maximumAge: maximumAge
+                maximumAge: effectiveMaximumAge
             )
         else { return }
 
@@ -1054,13 +1200,43 @@ final class SessionListModel: ObservableObject {
         await previousTask?.value
         guard replacementRequest == tokenScanReplacementRequest else { return }
 
-        let targets = await tokenScanTargetDiscoveryOperation(threads)
+        // 诊断耗时从真正开始发现目标时计算，不包含等待上一轮取消的时间。
+        let scanStartedAt = Date()
+        // 发现结果同时携带持久索引命中率和真实日志头读取量。
+        var discoveryResult = await tokenScanTargetDiscoveryOperation(threads)
         guard replacementRequest == tokenScanReplacementRequest else { return }
+        do {
+            // 通过首次代际校验后才持久化增量，淘汰的旧发现不会主动覆盖新索引。
+            try await store.updateTokenDiscoveryCache(
+                changedEntries: discoveryResult.changedCacheEntries,
+                removedPaths: discoveryResult.removedCachePaths
+            )
+        } catch {
+            // 索引写入失败不阻断当前目标扫描，但必须进入可见诊断。
+            discoveryResult = discoveryResult.markingCacheStoreFailed()
+        }
+        // 索引写入期间可能收到新请求，继续前必须再次确认代际。
+        guard replacementRequest == tokenScanReplacementRequest else { return }
+        // 后续覆盖、缓存和扫描全部使用同一份稳定目标集合。
+        let targets = discoveryResult.targets
         let cached = (try? await store.loadThreadTokenCache()) ?? threadTokenCache
+        // Token 缓存读取也是挂起点，避免旧请求恢复后覆盖新扫描任务。
+        guard replacementRequest == tokenScanReplacementRequest else { return }
         tokenScanGeneration += 1
         let generation = tokenScanGeneration
         let parserVersion = Self.tokenParserVersion
         let calendar = Calendar.current
+        // 细粒度事件只写入最近 30 个本地自然日，日汇总仍全部保存。
+        let timedUsageCutoff = TokenTimedRetentionPolicy.cutoff(
+            now: scanStartedAt,
+            calendar: calendar
+        )
+        // 同一进程每个本地自然日最多执行一次全局历史明细清理。
+        let shouldPruneTimedUsage = TokenTimedRetentionPolicy.shouldPrune(
+            lastPrunedAt: lastTimedUsagePruneAt,
+            now: scanStartedAt,
+            calendar: calendar
+        )
         let operation = tokenScanOperation
 
         tokenAttributionThreadIDs = Dictionary(
@@ -1070,7 +1246,7 @@ final class SessionListModel: ObservableObject {
             targets: targets,
             cache: cached,
             parserVersion: parserVersion
-        )
+        ).markingFailed(discoveryResult.uncertainTargetIDs)
         tokenCoveredThreadIDs = ThreadTokenCoverage.measuredTargetIDs(
             targets: targets,
             cache: cached,
@@ -1079,7 +1255,14 @@ final class SessionListModel: ObservableObject {
 
         isScanningTokenUsage = true
         tokenScanTask = Task.detached(priority: .utility) { [weak self, store] in
-            var failedTargetIDs: Set<String> = []
+            // 失败目标沿用既有覆盖健康语义，并进入本轮诊断。
+            var failedTargetIDs = discoveryResult.uncertainTargetIDs
+            // 完全命中 Token 缓存的目标不打开正文文件。
+            var tokenCacheReuseCount = 0
+            // 实际扫描调用数量包含全量重建和增量追加。
+            var tokenReadFileCount = 0
+            // 实际读取字节使用扫描前后偏移差累计。
+            var tokenReadBytes: Int64 = 0
             for target in targets {
                 guard !Task.isCancelled,
                     await self?.acceptsTokenScan(
@@ -1146,7 +1329,11 @@ final class SessionListModel: ObservableObject {
                     {
                         decision = .rebuild
                     }
-                    guard decision != .reuse else { continue }
+                    // 完全复用时只累计命中数，不进入正文解析和数据库写入。
+                    if decision == .reuse {
+                        tokenCacheReuseCount += 1
+                        continue
+                    }
 
                     let offset: Int64
                     let baseline: TokenScanState
@@ -1167,7 +1354,11 @@ final class SessionListModel: ObservableObject {
                         baseline = .empty
                     }
 
+                    // 即将调用解析器时才计为一次实际 Token 正文读取。
+                    tokenReadFileCount += 1
                     let result = try await operation(url, offset, baseline, calendar)
+                    // 解析器会读取到文件尾；按扫描前文件大小计入包含未换行尾段的真实字节。
+                    tokenReadBytes += max(0, size - offset)
                     guard !Task.isCancelled,
                         await self?.acceptsTokenScan(
                             generation,
@@ -1181,7 +1372,8 @@ final class SessionListModel: ObservableObject {
                         fileModificationTimeNS: modificationTimeNS,
                         parserVersion: parserVersion,
                         result: result,
-                        rebuild: decision == .rebuild
+                        rebuild: decision == .rebuild,
+                        timedUsageCutoff: timedUsageCutoff
                     )
                 } catch {
                     if Task.isCancelled { return }
@@ -1195,16 +1387,53 @@ final class SessionListModel: ObservableObject {
                     replacementRequest: replacementRequest
                 ) == true
             else { return }
+            // 清理结果默认是零，数据库失败不会中断已完成的 Token 统计发布。
+            var prunedTimedRowCount = 0
+            // 只有成功执行清理时才记录日期，失败会在下一轮扫描继续重试。
+            var timedUsagePrunedAt: Date?
+            if shouldPruneTimedUsage {
+                do {
+                    // 删除严格早于保留边界的秒级明细，日汇总表不受影响。
+                    prunedTimedRowCount = try await store.pruneThreadTokenTimedUsage(
+                        before: timedUsageCutoff
+                    )
+                    // 用扫描开始时间标记本地自然日，避免跨午夜完成造成重复判断。
+                    timedUsagePrunedAt = scanStartedAt
+                } catch {
+                    // 清理属于空间维护，失败时保留数据并让下次扫描重试。
+                }
+            }
             do {
                 async let loadedCache = store.loadThreadTokenCache()
                 async let loadedDailyUsage = store.loadThreadTokenDailyUsage()
                 let result = try await (loadedCache, loadedDailyUsage)
                 guard !Task.isCancelled else { return }
+                // 完成时间在数据库回读后生成，因此耗时覆盖整条扫描链路。
+                let completedAt = Date()
+                // 汇总持久发现索引、Token 缓存和实际 I/O 指标供设置页诊断。
+                let diagnostics = TokenScanDiagnostics(
+                    completedAt: completedAt,
+                    duration: max(0, completedAt.timeIntervalSince(scanStartedAt)),
+                    discoveryEnumeratedFileCount: discoveryResult.metrics.enumeratedJSONLCount,
+                    discoveryCacheHitCount: discoveryResult.metrics.cacheHitCount,
+                    discoveryReadFileCount: discoveryResult.metrics.metadataReadFileCount,
+                    discoveryReadBytes: discoveryResult.metrics.metadataReadBytes,
+                    discoveryFailedReadCount: discoveryResult.metrics.failedReadCount,
+                    discoveryCacheStoreFailed: discoveryResult.cacheStoreFailed,
+                    targetCount: targets.count,
+                    tokenCacheReuseCount: tokenCacheReuseCount,
+                    tokenReadFileCount: tokenReadFileCount,
+                    tokenReadBytes: tokenReadBytes,
+                    failedTargetCount: failedTargetIDs.count,
+                    prunedTimedRowCount: prunedTimedRowCount
+                )
                 await self?.publishTokenUsage(
                     cache: result.0,
                     dailyUsage: result.1,
                     targets: targets,
                     failedTargetIDs: failedTargetIDs,
+                    diagnostics: diagnostics,
+                    timedUsagePrunedAt: timedUsagePrunedAt,
                     generation: generation,
                     replacementRequest: replacementRequest
                 )
@@ -1228,6 +1457,8 @@ final class SessionListModel: ObservableObject {
         dailyUsage: [ThreadTokenDailyUsage],
         targets: [TokenScanTarget],
         failedTargetIDs: Set<String>,
+        diagnostics: TokenScanDiagnostics,
+        timedUsagePrunedAt: Date?,
         generation: Int,
         replacementRequest: Int
     ) async {
@@ -1247,6 +1478,12 @@ final class SessionListModel: ObservableObject {
             cache: cache,
             health: tokenScanHealth
         )
+        // 只有通过代际检查的完整扫描可以替换上一次诊断。
+        tokenScanDiagnostics = diagnostics
+        // 成功清理后记录日期，保证同一自然日不重复执行全局 DELETE。
+        if let timedUsagePrunedAt {
+            lastTimedUsagePruneAt = timedUsagePrunedAt
+        }
         await refreshQuotaCycleStatistics()
         isScanningTokenUsage = false
         tokenScanTask = nil
@@ -1263,6 +1500,23 @@ final class SessionListModel: ObservableObject {
         guard
             let start = QuotaCycleWindow.startTimestamp(
                 window: rateLimitSnapshot?.weeklyWindow
+            )
+        else {
+            quotaCycleStatisticsSnapshot = nil
+            return
+        }
+
+        // 秒级明细只保留最近 30 个本地自然日，先计算当前精确数据边界。
+        let timedUsageCutoff = TokenTimedRetentionPolicy.cutoff(
+            now: Date(timeIntervalSince1970: TimeInterval(now)),
+            calendar: calendar
+        )
+        // 若额度周期早于保留边界，宁可不展示，也不能把部分数据当成完整周期。
+        guard
+            start <= now,
+            TokenTimedRetentionPolicy.canRepresentExactRange(
+                startingAt: start,
+                cutoff: timedUsageCutoff
             )
         else {
             quotaCycleStatisticsSnapshot = nil

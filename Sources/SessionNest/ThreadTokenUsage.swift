@@ -92,6 +92,83 @@ struct TokenScanTarget: Equatable, Sendable {
     let url: URL
 }
 
+struct TokenDiscoveryCacheEntry: Equatable, Sendable {
+    // 路径作为发现缓存主键，使文件元数据可在知道会话 ID 前复用。
+    let rolloutPath: String
+    // 文件大小用于识别新增内容或替换后的日志。
+    let fileSize: Int64
+    // 纳秒修改时间与大小共同判断文件内容是否保持不变。
+    let fileModificationTimeNS: Int64
+    // 子代理 ID 为空表示该文件已成功检查且不是子代理日志。
+    let subagentID: String?
+    // 父会话 ID 与子代理 ID 同时存在时才能恢复归属关系。
+    let parentThreadID: String?
+    // 解析器版本变化时必须重新检查文件前缀。
+    let parserVersion: Int64
+}
+
+struct TokenDiscoveryMetrics: Equatable, Sendable {
+    // 记录目录枚举看到的 JSONL 数量，作为发现工作的总基数。
+    let enumeratedJSONLCount: Int
+    // 记录 path、size、mtime 和版本完全匹配的缓存数量。
+    let cacheHitCount: Int
+    // 记录实际尝试读取日志前缀的文件数量。
+    let metadataReadFileCount: Int
+    // 记录成功读入内存的前缀字节数，便于评估磁盘开销。
+    let metadataReadBytes: Int64
+    // 记录无法取得属性或读取前缀的文件数量。
+    let failedReadCount: Int
+}
+
+struct TokenDiscoveryResult: Equatable, Sendable {
+    // targets 是本轮可供 Token 扫描使用的完整父子目标集合。
+    let targets: [TokenScanTarget]
+    // changedCacheEntries 只包含新增或发生变化且成功检查的文件。
+    let changedCacheEntries: [TokenDiscoveryCacheEntry]
+    // removedCachePaths 只包含已完整枚举根目录中不再存在的缓存路径。
+    let removedCachePaths: Set<String>
+    // metrics 暴露真实发现成本，避免 UI 只统计 Token 正文读取量。
+    let metrics: TokenDiscoveryMetrics
+    // 不确定目标沿用旧父子关系参与扫描，但本轮必须排除出可信覆盖。
+    let uncertainTargetIDs: Set<String>
+    // 缓存存储访问失败时继续发布目标，同时让诊断解释为何无法命中。
+    let cacheStoreFailed: Bool
+
+    init(
+        targets: [TokenScanTarget],
+        changedCacheEntries: [TokenDiscoveryCacheEntry],
+        removedCachePaths: Set<String>,
+        metrics: TokenDiscoveryMetrics,
+        uncertainTargetIDs: Set<String> = [],
+        cacheStoreFailed: Bool = false
+    ) {
+        // 保存本轮完整目标集合。
+        self.targets = targets
+        // 保存需要持久化的索引增量。
+        self.changedCacheEntries = changedCacheEntries
+        // 保存已确认消失的缓存路径。
+        self.removedCachePaths = removedCachePaths
+        // 保存目录发现产生的实际 I/O 指标。
+        self.metrics = metrics
+        // 保存因发现读取失败而不能信任归属的目标。
+        self.uncertainTargetIDs = uncertainTargetIDs
+        // 保存缓存存储是否发生读写失败。
+        self.cacheStoreFailed = cacheStoreFailed
+    }
+
+    func markingCacheStoreFailed() -> Self {
+        // 只改变诊断状态，已发现目标和增量仍可用于当前扫描或后续重试。
+        Self(
+            targets: targets,
+            changedCacheEntries: changedCacheEntries,
+            removedCachePaths: removedCachePaths,
+            metrics: metrics,
+            uncertainTargetIDs: uncertainTargetIDs,
+            cacheStoreFailed: true
+        )
+    }
+}
+
 struct TokenScanHealth: Equatable, Sendable {
     let freshTargetIDs: Set<String>
     let staleTargetIDs: Set<String>
@@ -126,10 +203,31 @@ enum LocalTokenScanTargetDiscovery {
         roots: [URL] = defaultRoots(),
         fileManager: FileManager = .default
     ) -> [TokenScanTarget] {
+        // 兼容旧调用：不提供持久缓存时保持每次完整发现的既有行为。
+        discoverIndexed(
+            threads: threads,
+            cacheEntries: [:],
+            parserVersion: 1,
+            roots: roots,
+            fileManager: fileManager
+        ).targets
+    }
+
+    static func discoverIndexed(
+        threads: [CodexThread],
+        cacheEntries: [String: TokenDiscoveryCacheEntry],
+        parserVersion: Int64,
+        roots: [URL] = defaultRoots(),
+        fileManager: FileManager = .default
+    ) -> TokenDiscoveryResult {
+        // 可见会话 ID 是子代理沿父链向上归属的终点。
         let visibleThreadIDs = Set(threads.map(\.id))
+        // 可见会话自身始终作为扫描目标，不依赖目录发现结果。
         var targets = Dictionary(
             uniqueKeysWithValues: threads.compactMap { thread -> (String, TokenScanTarget)? in
+                // 没有本地日志路径的远端会话无法参与 Token 扫描。
                 guard let path = thread.path else { return nil }
+                // 父会话默认把用量归属给自己。
                 return (
                     thread.id,
                     TokenScanTarget(
@@ -140,39 +238,170 @@ enum LocalTokenScanTargetDiscovery {
                 )
             }
         )
+        // 所有已知子代理先保存直接父关系，随后统一解析多级链路。
         var subagents: [String: (parentID: String, url: URL)] = [:]
+        // 标准化根目录路径，避免尾部斜杠影响包含判断。
         let normalizedRoots = roots.map { $0.standardizedFileURL.path }
+        // 只有会话确实位于 Codex 日志根目录时才承担全目录发现成本。
         let hasThreadInRoots = targets.values.contains { target in
+            // 标准化目标路径后再与根目录比较。
             let path = target.url.standardizedFileURL.path
+            // 同时接受目标恰好等于根目录和位于根目录子层级两种情况。
             return normalizedRoots.contains { root in
                 path == root || path.hasPrefix(root + "/")
             }
         }
 
+        // seenPaths 用于区分真正删除的缓存和本轮仍存在的文件。
+        var seenPaths: Set<String> = []
+        // completedRootPaths 仅记录无枚举错误的根目录，防止误删暂时不可见缓存。
+        var completedRootPaths: Set<String> = []
+        // changedCacheEntries 只返回需要持久化的增量，避免每轮重写整张表。
+        var changedCacheEntries: [TokenDiscoveryCacheEntry] = []
+        // 以下计数直接反映目录发现产生的元数据和内容 I/O。
+        var enumeratedJSONLCount = 0
+        var cacheHitCount = 0
+        var metadataReadFileCount = 0
+        var metadataReadBytes: Int64 = 0
+        var failedReadCount = 0
+        // 变化文件读取失败时沿用旧关系扫描，但必须把对应目标标记为不确定。
+        var uncertainTargetIDs: Set<String> = []
+
+        // 当前实现与旧逻辑一致：一旦存在根内会话，就检查传入的全部日志根目录。
         for root in roots where hasThreadInRoots {
+            // 任一子路径枚举失败时不对该根目录生成删除集合。
+            var enumerationFailed = false
+            // 预取常用资源值，避免命中缓存前再调用 attributesOfItem。
+            let resourceKeys: Set<URLResourceKey> = [
+                .isRegularFileKey,
+                .fileSizeKey,
+                .contentModificationDateKey,
+            ]
+            // 枚举错误继续其他目录，但会阻止本根目录清理旧缓存。
             guard
                 let enumerator = fileManager.enumerator(
                     at: root,
-                    includingPropertiesForKeys: [.isRegularFileKey],
-                    options: [.skipsHiddenFiles]
+                    includingPropertiesForKeys: Array(resourceKeys),
+                    options: [.skipsHiddenFiles],
+                    errorHandler: { _, _ in
+                        // 记录不完整枚举，避免把权限或瞬时错误解释为文件删除。
+                        enumerationFailed = true
+                        // 返回 true 继续处理仍可访问的其他路径。
+                        return true
+                    }
                 )
             else { continue }
+            // 逐个处理 JSONL；目录和非日志文件不会进入缓存。
             for case let url as URL in enumerator where url.pathExtension.lowercased() == "jsonl" {
-                guard let metadata = subagentMetadata(at: url) else { continue }
-                subagents[metadata.id] = (metadata.parentID, url)
+                // 统计所有枚举到的 JSONL 候选项。
+                enumeratedJSONLCount += 1
+                // 标准化路径，使内存字典、SQLite 主键和删除判断保持一致。
+                let path = url.standardizedFileURL.path
+                // 重叠根目录可能重复返回同一路径，只处理首次出现的一项。
+                guard seenPaths.insert(path).inserted else { continue }
+                // 取出历史项，读取失败时可保守恢复已知的正向父子关系。
+                let cached = cacheEntries[path]
+
+                let values: URLResourceValues
+                do {
+                    // 获取当前 size 和 mtime，命中时无需打开 JSONL。
+                    values = try url.resourceValues(forKeys: resourceKeys)
+                } catch {
+                    // 属性读取失败意味着无法验证缓存是否仍然新鲜。
+                    failedReadCount += 1
+                    // 若以前确认过子代理关系，继续保留目标以免父会话误报完整覆盖。
+                    if let id = restoreCachedSubagent(cached, url: url, into: &subagents) {
+                        // 旧父子关系仅作保守占位，不能作为本轮可信统计覆盖。
+                        uncertainTargetIDs.insert(id)
+                    }
+                    continue
+                }
+                // 目录等伪装成 .jsonl 的条目不能作为日志读取。
+                guard values.isRegularFile == true,
+                    let fileSize = values.fileSize,
+                    let modificationDate = values.contentModificationDate
+                else {
+                    // 非普通文件或属性不全视为发现失败。
+                    failedReadCount += 1
+                    // 失败时保留既有正向关系，并留待下一轮重试。
+                    if let id = restoreCachedSubagent(cached, url: url, into: &subagents) {
+                        // 属性不完整时同样排除复用关系，等待下轮重新确认。
+                        uncertainTargetIDs.insert(id)
+                    }
+                    continue
+                }
+                // 与现有 Token 缓存使用相同的纳秒时间表示。
+                let modificationTimeNS = Int64(
+                    (modificationDate.timeIntervalSince1970 * 1_000_000_000).rounded()
+                )
+                // path、size、mtime 和解析器版本全部一致才允许跳过内容读取。
+                if let cached,
+                    cached.rolloutPath == path,
+                    cached.fileSize == Int64(fileSize),
+                    cached.fileModificationTimeNS == modificationTimeNS,
+                    cached.parserVersion == parserVersion
+                {
+                    // 命中项复用正向或负向元数据。
+                    cacheHitCount += 1
+                    // 负缓存没有子代理 ID，因此该调用不会产生扫描目标。
+                    restoreCachedSubagent(cached, url: url, into: &subagents)
+                    continue
+                }
+
+                // 未命中项才会真正打开文件并读取前 64 KiB。
+                metadataReadFileCount += 1
+                // 读取结果区分“成功但不是子代理”和“读取失败”。
+                switch readSubagentMetadata(at: url) {
+                case .success(let metadata, let bytesRead):
+                    // 累加实际进入内存的字节数，空文件会贡献 0。
+                    metadataReadBytes += bytesRead
+                    // 成功读取必须写入正缓存或负缓存，供下一轮直接复用。
+                    let entry = TokenDiscoveryCacheEntry(
+                        rolloutPath: path,
+                        fileSize: Int64(fileSize),
+                        fileModificationTimeNS: modificationTimeNS,
+                        subagentID: metadata?.id,
+                        parentThreadID: metadata?.parentID,
+                        parserVersion: parserVersion
+                    )
+                    // 只把新增或变化项交给持久层更新。
+                    changedCacheEntries.append(entry)
+                    // 正向结果参与本轮父链解析；负结果仅进入缓存。
+                    restoreCachedSubagent(entry, url: url, into: &subagents)
+                case .failure:
+                    // 读取失败不能写负缓存，否则权限恢复后仍会被永久跳过。
+                    failedReadCount += 1
+                    // 保留旧正向关系，使后续 Token 扫描能把该目标标记失败。
+                    if let id = restoreCachedSubagent(cached, url: url, into: &subagents) {
+                        // 前缀读取失败时正文即使成功，也不能证明旧父子关系仍然有效。
+                        uncertainTargetIDs.insert(id)
+                    }
+                }
+            }
+            // 只有整个根目录枚举完整时才允许清理本根目录的消失路径。
+            if !enumerationFailed {
+                // 标准化根路径后加入删除范围。
+                completedRootPaths.insert(root.standardizedFileURL.path)
             }
         }
 
+        // 子代理可以通过其他子代理逐层向上找到可见父会话。
         for (id, subagent) in subagents {
+            // 从直接父 ID 开始向上解析。
             var parentID = subagent.parentID
+            // visited 防止损坏日志形成父链环路。
             var visited: Set<String> = [id]
+            // 未抵达可见会话时继续沿已发现父关系上溯。
             while !visibleThreadIDs.contains(parentID),
                 let parent = subagents[parentID],
                 visited.insert(parentID).inserted
             {
+                // 更新为更上一层父 ID。
                 parentID = parent.parentID
             }
+            // 无法抵达可见会话的孤立子代理不参与当前统计。
             guard visibleThreadIDs.contains(parentID) else { continue }
+            // 最终目标把子代理 Token 归属到最上层可见父会话。
             targets[id] = TokenScanTarget(
                 id: id,
                 attributionThreadID: parentID,
@@ -180,7 +409,41 @@ enum LocalTokenScanTargetDiscovery {
             )
         }
 
-        return targets.values.sorted { $0.id > $1.id }
+        // 仅在完整枚举的根目录内识别真正消失的缓存路径。
+        let removedCachePaths = Set(
+            cacheEntries.values.compactMap { entry -> String? in
+                // 标准化历史路径，兼容旧数据中可能存在的路径表现差异。
+                let path = URL(fileURLWithPath: entry.rolloutPath).standardizedFileURL.path
+                // 未完整扫描的根目录不能产生删除操作。
+                guard
+                    completedRootPaths.contains(where: { root in
+                        path == root || path.hasPrefix(root + "/")
+                    })
+                else { return nil }
+                // 本轮仍见到的路径应继续保留。
+                guard !seenPaths.contains(path) else { return nil }
+                // 返回持久层实际使用的原始主键。
+                return entry.rolloutPath
+            }
+        )
+        // 保持旧 API 的稳定排序，避免缓存引入 UI 顺序变化。
+        let sortedTargets = targets.values.sorted { $0.id > $1.id }
+        // 汇总本轮真实 I/O 数据，交给诊断层展示或测试。
+        let metrics = TokenDiscoveryMetrics(
+            enumeratedJSONLCount: enumeratedJSONLCount,
+            cacheHitCount: cacheHitCount,
+            metadataReadFileCount: metadataReadFileCount,
+            metadataReadBytes: metadataReadBytes,
+            failedReadCount: failedReadCount
+        )
+        // 返回目标、缓存增量、删除集合和诊断指标。
+        return TokenDiscoveryResult(
+            targets: sortedTargets,
+            changedCacheEntries: changedCacheEntries,
+            removedCachePaths: removedCachePaths,
+            metrics: metrics,
+            uncertainTargetIDs: uncertainTargetIDs
+        )
     }
 
     private static func defaultRoots() -> [URL] {
@@ -194,12 +457,29 @@ enum LocalTokenScanTargetDiscovery {
         ]
     }
 
-    private static func subagentMetadata(at url: URL) -> (id: String, parentID: String)? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: 64 * 1024) else { return nil }
+    private static func readSubagentMetadata(at url: URL) -> MetadataReadResult {
+        do {
+            // 打开失败属于可重试错误，不能持久化为负缓存。
+            let handle = try FileHandle(forReadingFrom: url)
+            // 无论读取和解析结果如何都关闭文件描述符。
+            defer { try? handle.close() }
+            // 空文件是成功的负结果，因此 nil 按空数据处理。
+            let data = try handle.read(upToCount: 64 * 1024) ?? Data()
+            // 成功读取后同时返回解析结果和实际字节数。
+            return .success(
+                metadata: parseSubagentMetadata(in: data),
+                bytesRead: Int64(data.count)
+            )
+        } catch {
+            // 读取错误留待下轮重试，并由调用方保留旧正向关系。
+            return .failure
+        }
+    }
 
+    private static func parseSubagentMetadata(in data: Data) -> SubagentMetadata? {
+        // 只检查前 33 行，保持与旧发现逻辑一致的成本上限。
         for line in data.split(separator: 0x0A, maxSplits: 32) {
+            // 快速字符串过滤避免对普通事件行执行 JSON 解析。
             guard line.range(of: Data(#""session_meta""#.utf8)) != nil,
                 let object = try? JSONSerialization.jsonObject(with: Data(line))
                     as? [String: Any],
@@ -211,9 +491,41 @@ enum LocalTokenScanTargetDiscovery {
                 let spawn = subagent["thread_spawn"] as? [String: Any],
                 let parentID = spawn["parent_thread_id"] as? String
             else { continue }
-            return (id, parentID)
+            // 找到首个完整子代理元数据后立即结束前缀扫描。
+            return SubagentMetadata(id: id, parentID: parentID)
         }
+        // 成功读取但没有子代理元数据时形成可复用的负结果。
         return nil
+    }
+
+    @discardableResult
+    private static func restoreCachedSubagent(
+        _ entry: TokenDiscoveryCacheEntry?,
+        url: URL,
+        into subagents: inout [String: (parentID: String, url: URL)]
+    ) -> String? {
+        // 只有 ID 和父 ID 同时存在才是可用于归属的正向发现结果。
+        guard let id = entry?.subagentID,
+            let parentID = entry?.parentThreadID
+        else { return nil }
+        // 使用本轮枚举 URL，避免缓存路径表现差异影响后续文件读取。
+        subagents[id] = (parentID, url)
+        // 返回恢复的目标 ID，让失败分支可以把该关系标记为不确定。
+        return id
+    }
+
+    private struct SubagentMetadata: Equatable, Sendable {
+        // id 是子代理自身会话 ID。
+        let id: String
+        // parentID 是日志元数据声明的直接父会话 ID。
+        let parentID: String
+    }
+
+    private enum MetadataReadResult {
+        // 成功读取允许 metadata 为空，以表达可信负缓存。
+        case success(metadata: SubagentMetadata?, bytesRead: Int64)
+        // failure 表示文件应在下轮继续尝试读取。
+        case failure
     }
 }
 
