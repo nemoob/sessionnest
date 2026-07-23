@@ -32,12 +32,10 @@ struct QuotaDashboardView: View {
 
                 resetCreditsSection(resetCredits)
 
-                Text(
-                    "额度百分比和重置时间来自 Codex App Server；Token 数量只根据本机可读取的 Codex 会话记录统计，不代表服务端计费量，也不能与额度百分比直接换算。"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                Text(TokenUsageDefinition.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(20)
         }
@@ -129,7 +127,7 @@ struct QuotaDashboardView: View {
 
     private var cycleTokenCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("本额度周期 Token", systemImage: "number.circle")
+            Label("本额度周期总 Token", systemImage: "number.circle")
                 .font(.headline)
             Text(cycleTokenText)
                 .font(.system(size: 30, weight: .semibold, design: .rounded))

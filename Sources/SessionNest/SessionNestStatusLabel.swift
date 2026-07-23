@@ -60,6 +60,7 @@ struct SessionNestStatusLabel: View {
                             weight: .medium
                         )
                     )
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .layoutPriority(1)

@@ -43,8 +43,9 @@ struct RefreshButtonVisualState: Equatable {
     let isVisuallyEnabled = true
     let isAnimating: Bool
 
-    init(isRefreshing: Bool) {
-        isAnimating = isRefreshing
+    init(isRefreshing: Bool, isVisible: Bool = true) {
+        // 弹框隐藏后停止刷新图标动画，避免保留的 hosting view 持续唤醒主线程。
+        isAnimating = isRefreshing && isVisible
     }
 }
 
@@ -360,6 +361,122 @@ struct AppUpdateSettingsStatus: Equatable {
     }
 }
 
+enum SessionNestDiagnosticCopyFeedback: Equatable {
+    case idle
+    case copied
+    case failed
+
+    var title: String {
+        switch self {
+        case .idle: "复制脱敏诊断"
+        case .copied: "脱敏诊断已复制"
+        case .failed: "复制失败，请重试"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .idle: "doc.on.doc"
+        case .copied: "checkmark"
+        case .failed: "exclamationmark.triangle"
+        }
+    }
+}
+
+struct SessionNestDiagnosticReport: Equatable {
+    let text: String
+
+    init(
+        generatedAt: Date,
+        appVersion: String,
+        appBuild: String,
+        operatingSystemVersion: String,
+        timeZoneIdentifier: String,
+        coverage: TokenCoverageBreakdown,
+        diagnostics: TokenScanDiagnostics?,
+        anomaly: TokenUsageAnomaly?
+    ) {
+        let formatter = ISO8601DateFormatter()
+        var lines = [
+            "SessionNest redacted diagnostics",
+            "generated_at=\(formatter.string(from: generatedAt))",
+            "app_version=\(appVersion)",
+            "app_build=\(appBuild)",
+            "operating_system=\(operatingSystemVersion)",
+            "time_zone=\(timeZoneIdentifier)",
+            "privacy=excludes account, session title, session id, directory path, and log content",
+            "",
+            "[token_statistics]",
+            "coverage.total_sessions=\(coverage.totalSessionCount)",
+            "coverage.measured_sessions=\(coverage.measuredSessionCount)",
+            "coverage.missing_log_sessions=\(coverage.missingLogSessionCount)",
+            "coverage.empty_log_sessions=\(coverage.emptyLogSessionCount)",
+            "coverage.stale_log_sessions=\(coverage.staleLogSessionCount)",
+            "coverage.failed_log_sessions=\(coverage.failedLogSessionCount)",
+            "anomaly=\(Self.anomalyText(anomaly))",
+            "",
+            "[latest_scan]",
+        ]
+
+        if let diagnostics {
+            lines += [
+                "scan.status=available",
+                "scan.completed_at=\(formatter.string(from: diagnostics.completedAt))",
+                "scan.duration_ms=\(Int((max(0, diagnostics.duration) * 1_000).rounded()))",
+                "scan.discovery.enumerated_files=\(diagnostics.discoveryEnumeratedFileCount)",
+                "scan.discovery.cache_hits=\(diagnostics.discoveryCacheHitCount)",
+                "scan.discovery.read_files=\(diagnostics.discoveryReadFileCount)",
+                "scan.discovery.read_bytes=\(diagnostics.discoveryReadBytes)",
+                "scan.discovery.failed_reads=\(diagnostics.discoveryFailedReadCount)",
+                "scan.discovery.cache_store_failed=\(diagnostics.discoveryCacheStoreFailed)",
+                "scan.token.targets=\(diagnostics.targetCount)",
+                "scan.token.cache_reuses=\(diagnostics.tokenCacheReuseCount)",
+                "scan.token.read_files=\(diagnostics.tokenReadFileCount)",
+                "scan.token.read_bytes=\(diagnostics.tokenReadBytes)",
+                "scan.token.duplicate_checkpoints=\(diagnostics.duplicateTokenCheckpointCount)",
+                "scan.token.reconciliations=\(diagnostics.tokenReconciliationCount)",
+                "scan.token.failed_targets=\(diagnostics.failedTargetCount)",
+                "scan.token.pruned_timed_rows=\(diagnostics.prunedTimedRowCount)",
+            ]
+        } else {
+            lines.append("scan.status=unavailable")
+        }
+        text = lines.joined(separator: "\n")
+    }
+
+    private static func anomalyText(_ anomaly: TokenUsageAnomaly?) -> String {
+        switch anomaly {
+        case .none:
+            "none"
+        case .some(.droppedToZero(let previous)):
+            "dropped_to_zero previous_total_tokens=\(previous)"
+        case .some(.doubled(let previous, let current)):
+            "doubled previous_total_tokens=\(previous) current_total_tokens=\(current)"
+        }
+    }
+}
+
+@MainActor
+struct SessionNestDiagnosticReportCopier {
+    func copy(
+        _ report: String,
+        pasteboard: NSPasteboard = .general
+    ) -> Bool {
+        // 复用截图的事务式剪贴板替换，失败时恢复原有的全部项目与类型。
+        StatusPopoverScreenshotCopier.replaceClipboard(
+            with: report,
+            pasteboard: pasteboard
+        )
+    }
+
+    func copy(
+        _ report: String,
+        writeString: (String) -> Bool
+    ) -> Bool {
+        writeString(report)
+    }
+}
+
 struct SessionNestStatusPopover: View {
     @ObservedObject var model: SessionListModel
     @ObservedObject var refreshState: StatusItemRefreshState
@@ -368,6 +485,7 @@ struct SessionNestStatusPopover: View {
     @Environment(\.colorScheme) private var systemColorScheme
     @State private var page = StatusPopoverPage.overview
     @State private var screenshotFeedback = StatusPopoverScreenshotFeedback.idle
+    @State private var diagnosticCopyFeedback = SessionNestDiagnosticCopyFeedback.idle
     @AppStorage("sessionnest.theme") private var storedTheme = AppTheme.system.rawValue
     @AppStorage(SessionNestLaunchPreference.opensMainWindowKey)
     private var opensMainWindowOnLaunch = false
@@ -395,10 +513,11 @@ struct SessionNestStatusPopover: View {
     }
 
     private var overview: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             overviewContent(includesScreenshotAction: true, screenshotPrivacy: nil)
                 .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
         }
+        .scrollIndicators(.visible)
         .padding(.trailing, -SessionNestStatusPopoverLayout.scrollViewTrailingExtension)
     }
 
@@ -412,6 +531,9 @@ struct SessionNestStatusPopover: View {
             cycleSnapshot: model.quotaCycleStatisticsSnapshot,
             fallbackSnapshot: model.statisticsSnapshot(for: .sevenDays)
         )
+        let dailyTokenStartingAt = model.quotaCycleStatisticsSnapshot.flatMap { _ in
+            QuotaCycleWindow.startTimestamp(window: model.rateLimitSnapshot?.weeklyWindow)
+        }
         let snapshot = statisticsScope.snapshot
         let status = MenuBarStatus(
             snapshot: snapshot,
@@ -427,12 +549,16 @@ struct SessionNestStatusPopover: View {
             snapshot: snapshot,
             isScanningTokenUsage: model.isScanningTokenUsage
         )
-        let tokenScanHealth = TokenScanHealthStatus(
+        let tokenCoverage = TokenCoverageStatus(
+            breakdown: model.tokenCoverageBreakdown(for: snapshot),
             health: model.tokenScanHealth,
             isScanning: model.isScanningTokenUsage
         )
         let resetCredits = MenuBarResetCreditsStatus(summary: model.resetCreditsSnapshot)
-        let refreshButtonState = RefreshButtonVisualState(isRefreshing: status.showsProgress)
+        let refreshButtonState = RefreshButtonVisualState(
+            isRefreshing: status.showsProgress,
+            isVisible: refreshState.isPopoverShown
+        )
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
@@ -518,14 +644,6 @@ struct SessionNestStatusPopover: View {
                 quota: status.weeklyQuota,
                 usesPlatformProgress: includesScreenshotAction
             )
-            Text(statisticsScope.dailyTokenTitle)
-                .font(.subheadline.weight(.semibold))
-            DailyTokenUsageChart(
-                points: statistics.dailyPoints,
-                now: now,
-                calendar: calendar
-            )
-            resetCreditsRow(resetCredits)
 
             Text(statisticsScope.title)
                 .font(.subheadline.weight(.semibold))
@@ -546,29 +664,39 @@ struct SessionNestStatusPopover: View {
             VStack(spacing: 10) {
                 HStack(spacing: 10) {
                     metricCard(
+                        title: "总 Token",
+                        value: statistics.totalTokenValueText,
+                        detail: statistics.totalTokenDetailText
+                    )
+                    metricCard(
+                        title: "非缓存 Token",
+                        value: statistics.nonCachedTokenValueText,
+                        detail: statistics.nonCachedTokenDetailText
+                    )
+                }
+                HStack(spacing: 10) {
+                    metricCard(
                         title: "会话",
                         value: statistics.sessionValueText,
                         detail: statistics.sessionDetailText
                     )
                     metricCard(
-                        title: "总 Token",
-                        value: statistics.totalTokenValueText,
-                        detail: statistics.totalTokenDetailText
-                    )
-                }
-                HStack(spacing: 10) {
-                    metricCard(
                         title: "平均 / 会话",
                         value: statistics.averageValueText,
                         detail: statistics.averageDetailText
                     )
-                    metricCard(
-                        title: "缓存输入",
-                        value: statistics.cachedInputValueText,
-                        detail: statistics.cachedInputDetailText
-                    )
                 }
             }
+
+            Text(statisticsScope.dailyTokenTitle)
+                .font(.subheadline.weight(.semibold))
+            DailyTokenUsageChart(
+                points: statistics.dailyPoints,
+                startingAt: dailyTokenStartingAt,
+                now: now,
+                calendar: calendar
+            )
+            resetCreditsRow(resetCredits)
 
             Text("Token 趋势")
                 .font(.subheadline.weight(.semibold))
@@ -625,10 +753,16 @@ struct SessionNestStatusPopover: View {
             Text(status.tokenCoverageText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(tokenScanHealth.text)
+            Text(tokenCoverage.noticeText)
                 .font(.caption)
-                .foregroundStyle(tokenScanHealth.isWarning ? Color.orange : Color.secondary)
+                .foregroundStyle(tokenCoverage.isWarning ? Color.orange : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if let anomaly = model.tokenUsageAnomaly {
+                Label(anomaly.noticeText, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             Divider()
             HStack {
@@ -700,7 +834,7 @@ struct SessionNestStatusPopover: View {
             }
 
             // 仅设置内容滚动，让返回入口始终固定在弹框顶部。
-            ScrollView {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 16) {
 
                     Text("主题")
@@ -743,10 +877,6 @@ struct SessionNestStatusPopover: View {
                             set: { isEnabled in
                                 // 保存用户选择，让下次启动继续采用相同更新策略。
                                 updateChecker.setAutomaticChecksEnabled(isEnabled)
-                                if isEnabled {
-                                    // 用户重新启用后立即尝试一次受每日频率限制的自动检查。
-                                    Task { await updateChecker.check(.automatic) }
-                                }
                             }
                         )
                     )
@@ -773,6 +903,7 @@ struct SessionNestStatusPopover: View {
                 .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
+            .scrollIndicators(.visible)
             // 把滚动条移到弹框边缘，同时保留内容自身的安全间距。
             .padding(.trailing, -SessionNestStatusPopoverLayout.scrollViewTrailingExtension)
         }
@@ -780,8 +911,19 @@ struct SessionNestStatusPopover: View {
 
     private var scanDiagnosticsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("扫描诊断")
-                .font(.title2.weight(.semibold))
+            HStack {
+                Text("扫描诊断")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button {
+                    copyDiagnosticReport()
+                } label: {
+                    Label(
+                        diagnosticCopyFeedback.title,
+                        systemImage: diagnosticCopyFeedback.systemImage
+                    )
+                }
+            }
 
             if let diagnostics = model.tokenScanDiagnostics {
                 LabeledContent("最近完成") {
@@ -830,6 +972,14 @@ struct SessionNestStatusPopover: View {
                         + diagnosticByteCount(diagnostics.tokenReadBytes)
                 )
                 diagnosticRow(
+                    title: "重复检查点去重",
+                    value: "\(diagnostics.duplicateTokenCheckpointCount) 个"
+                )
+                diagnosticRow(
+                    title: "原始日志对账",
+                    value: "\(diagnostics.tokenReconciliationCount) 个"
+                )
+                diagnosticRow(
                     title: "扫描失败",
                     value: "\(diagnostics.failedTargetCount) 个"
                 )
@@ -844,6 +994,7 @@ struct SessionNestStatusPopover: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
+                Text("复制内容不含账号、会话标题、会话 ID、目录路径或日志内容")
                 Text("细粒度明细保留最近 30 天，日汇总长期保留")
                 Text("低电量模式自动会话扫描最多每小时一次，手动刷新不受影响")
             }
@@ -852,6 +1003,35 @@ struct SessionNestStatusPopover: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         .font(.callout)
+    }
+
+    @MainActor
+    private func copyDiagnosticReport() {
+        let bundle = Bundle.main
+        let snapshot = model.statisticsSnapshot(for: .all)
+        let report = SessionNestDiagnosticReport(
+            generatedAt: Date(),
+            appVersion: bundle.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+            ) as? String ?? "unknown",
+            appBuild: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+                ?? "unknown",
+            operatingSystemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            timeZoneIdentifier: Calendar.current.timeZone.identifier,
+            coverage: model.tokenCoverageBreakdown(for: snapshot),
+            diagnostics: model.tokenScanDiagnostics,
+            anomaly: model.tokenUsageAnomaly
+        )
+        diagnosticCopyFeedback =
+            SessionNestDiagnosticReportCopier().copy(report.text) ? .copied : .failed
+
+        let feedback = diagnosticCopyFeedback
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            if diagnosticCopyFeedback == feedback {
+                diagnosticCopyFeedback = .idle
+            }
+        }
     }
 
     private func diagnosticRow(title: String, value: String) -> some View {
@@ -938,7 +1118,7 @@ struct SessionNestStatusPopover: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
+                ScrollView(.vertical) {
                     VStack(spacing: 10) {
                         ForEach(status.availableCredits) { credit in
                             VStack(alignment: .leading, spacing: 6) {
@@ -966,7 +1146,10 @@ struct SessionNestStatusPopover: View {
                             )
                         }
                     }
+                    .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
                 }
+                .scrollIndicators(.visible)
+                .padding(.trailing, -SessionNestStatusPopoverLayout.scrollViewTrailingExtension)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

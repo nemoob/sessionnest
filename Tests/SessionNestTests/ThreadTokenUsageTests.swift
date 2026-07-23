@@ -5,6 +5,47 @@ import Testing
 
 @Suite("ThreadTokenUsageTests")
 struct ThreadTokenUsageTests {
+    @Test func tokenUsageDefinesNonCachedTokensWithoutDoubleCountingOrUnderflow() {
+        #expect(usage(100, 80, 20, 10, 120).nonCachedTokens == 40)
+        #expect(usage(50, 80, 0, 0, 50).nonCachedTokens == 0)
+        #expect(usage(50, -10, 0, 0, 50).nonCachedTokens == 50)
+        #expect(usage(0, 0, 0, 0, -1).nonCachedTokens == 0)
+    }
+
+    @Test func tokenUsageDefinitionSeparatesLocalTokensFromServerQuota() {
+        #expect(TokenUsageDefinition.explanation.contains("总 Token"))
+        #expect(TokenUsageDefinition.explanation.contains("非缓存 Token"))
+        #expect(TokenUsageDefinition.explanation.contains("Codex 服务端百分比"))
+        #expect(TokenUsageDefinition.explanation.contains("本地 Token 不参与换算"))
+    }
+
+    @Test func recalculationRangeUsesInclusiveLocalDaysAcrossDST() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let selectedDay = try #require(
+            calendar.date(
+                from: DateComponents(year: 2026, month: 3, day: 8, hour: 12)
+            ))
+        let range = try #require(
+            TokenUsageRecalculationRange(
+                from: selectedDay,
+                through: selectedDay,
+                calendar: calendar
+            ))
+
+        #expect(range.endDayExclusive - range.startDay == 23 * 60 * 60)
+        #expect(range.contains(range.startDay))
+        #expect(range.contains(range.endDayExclusive - 1))
+        #expect(!range.contains(range.endDayExclusive))
+        #expect(
+            TokenUsageRecalculationRange(
+                from: selectedDay.addingTimeInterval(24 * 60 * 60),
+                through: selectedDay,
+                calendar: calendar
+            ) == nil
+        )
+    }
+
     @Test func subagentScanExcludesForkedParentHistory() throws {
         let lines = [
             #"{"timestamp":"2026-07-20T06:12:34.472Z","type":"session_meta","payload":{"id":"019f7e27-a0fa-7f33-a653-c4318fa5dd48","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}"#,
@@ -312,6 +353,42 @@ struct ThreadTokenUsageTests {
         #expect(result.targets.first { $0.id == "child" }?.attributionThreadID == "parent")
         // 旧关系只作占位，本轮必须排除出可信覆盖直到前缀重新读取成功。
         #expect(result.uncertainTargetIDs == ["child"])
+        // 已知正向缓存可把影响精确限制在 child，不必撤下其他父会话。
+        #expect(!result.hasUnattributedReadFailure)
+        #expect(result.unreliableTargetIDs == ["child"])
+    }
+
+    @Test func indexedDiscoveryInvalidatesCoverageForUnattributedReadFailure() throws {
+        // 创建独立发现根，模拟原先被负缓存、如今无法确认内容的日志。
+        let root = try discoveryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let parentURL = root.appendingPathComponent("parent.jsonl")
+        let failedURL = root.appendingPathComponent("failed.jsonl", isDirectory: true)
+        try Data().write(to: parentURL)
+        try FileManager.default.createDirectory(at: failedURL, withIntermediateDirectories: true)
+        let parent = discoveryThread(id: "parent", url: parentURL)
+        let negativeEntry = TokenDiscoveryCacheEntry(
+            rolloutPath: failedURL.standardizedFileURL.path,
+            fileSize: 1,
+            fileModificationTimeNS: 1,
+            subagentID: nil,
+            parentThreadID: nil,
+            parserVersion: 1
+        )
+
+        let result = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: [negativeEntry.rolloutPath: negativeEntry],
+            parserVersion: 1,
+            roots: [root]
+        )
+
+        // 无法读取的变化文件可能已经成为子代理，旧负缓存不能证明其仍无归属。
+        #expect(result.metrics.failedReadCount == 1)
+        #expect(result.uncertainTargetIDs.isEmpty)
+        #expect(result.hasUnattributedReadFailure)
+        // 影响无法缩小时撤下本轮全部目标，避免把少算结果显示为完整覆盖。
+        #expect(result.unreliableTargetIDs == ["parent"])
     }
 
     @Test func scanStopsWhenCancellationIsRequested() throws {
@@ -354,6 +431,7 @@ struct ThreadTokenUsageTests {
         #expect(result.maximum == usage(160, 80, 40, 30, 200))
         #expect(latestEventTimestamp == unixSeconds("2026-07-13T16:02:00.000Z"))
         #expect(result.observedCheckpoint)
+        #expect(result.duplicateTokenCheckpointCount == 1)
 
         let firstDay = dayStart("2026-07-13T15:59:00.000Z", calendar: calendar)
         let secondDay = dayStart("2026-07-13T16:01:00.000Z", calendar: calendar)
@@ -411,6 +489,34 @@ struct ThreadTokenUsageTests {
         #expect(resumed.offset == first.offset + Int64(secondLine.utf8.count))
         #expect(resumed.maximum == usage(15, 8, 4, 1, 19))
         #expect(resumed.dailyUsage.values.reduce(.zero, +) == usage(15, 8, 4, 1, 19))
+    }
+
+    @Test func incrementalScanDeduplicatesPersistedCheckpoint() throws {
+        let baseline = TokenScanState(
+            maximum: usage(100, 0, 0, 0, 100),
+            dailyUsage: [:],
+            latestEventTimestamp: unixSeconds("2026-07-13T15:59:00Z"),
+            observedCheckpoint: true
+        )
+        let lines = [
+            #"{"timestamp":"2026-07-13T16:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":100}}}}"#,
+            #"{"timestamp":"2026-07-13T16:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":130}}}}"#,
+        ]
+        let url = try fixture(data: Data((lines.joined(separator: "\n") + "\n").utf8))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try RolloutTokenScanner.scan(
+            url: url,
+            baseline: baseline,
+            calendar: localCalendar
+        )
+        let day = dayStart("2026-07-13T16:00:00Z", calendar: localCalendar)
+        let newEvent = unixSeconds("2026-07-13T16:01:00Z")
+
+        #expect(result.duplicateTokenCheckpointCount == 1)
+        #expect(result.maximum == usage(120, 0, 10, 0, 130))
+        #expect(result.dailyUsage == [day: usage(20, 0, 10, 0, 30)])
+        #expect(result.timedUsage == [newEvent: usage(20, 0, 10, 0, 30)])
     }
 
     @Test func reboundBelowHistoricalMaximumAddsNoUsage() throws {
@@ -483,6 +589,23 @@ struct ThreadTokenUsageTests {
             decision(fileSize: 100, modificationTime: earlierNanoseconds, parserVersion: 2)
                 == .rebuild)
         #expect(decision(fileSize: 100, modificationTime: laterNanoseconds) == .rebuild)
+    }
+
+    @Test func tokenReconciliationBecomesDueAtTwentyFourHours() {
+        let now: Int64 = 1_784_764_800
+
+        #expect(TokenReconciliationPolicy.isDue(lastReconciledAt: nil, now: now))
+        #expect(
+            !TokenReconciliationPolicy.isDue(
+                lastReconciledAt: now - TokenReconciliationPolicy.minimumInterval + 1,
+                now: now
+            ))
+        #expect(
+            TokenReconciliationPolicy.isDue(
+                lastReconciledAt: now - TokenReconciliationPolicy.minimumInterval,
+                now: now
+            ))
+        #expect(!TokenReconciliationPolicy.isDue(lastReconciledAt: .max, now: now))
     }
 
     @Test func quotaCycleStartTimestampPreservesNonMidnightBoundary() {

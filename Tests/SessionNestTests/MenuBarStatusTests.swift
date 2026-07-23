@@ -33,6 +33,41 @@ import Testing
     #expect(TokenScanHealthStatus(health: fresh, isScanning: false).isWarning == false)
 }
 
+@Test func tokenCoverageStatusShowsPercentAndExactUnmeasuredReasons() {
+    let breakdown = TokenCoverageBreakdown(
+        totalSessionCount: 10,
+        measuredSessionCount: 6,
+        missingLogSessionCount: 1,
+        emptyLogSessionCount: 1,
+        staleLogSessionCount: 1,
+        failedLogSessionCount: 1
+    )
+    let health = TokenScanHealth(
+        freshTargetIDs: ["fresh"],
+        staleTargetIDs: ["stale"],
+        failedTargetIDs: ["failed"]
+    )
+    let status = TokenCoverageStatus(
+        breakdown: breakdown,
+        health: health,
+        isScanning: false
+    )
+
+    #expect(status.metricDetailText == "已统计 6 / 10（60%）")
+    #expect(
+        status.noticeText
+            == "未统计 4 个会话：未发现日志 1、无 Token 事件 1、日志待更新 1、扫描失败 1"
+    )
+    #expect(status.isWarning)
+    #expect(
+        TokenCoverageStatus(
+            breakdown: breakdown,
+            health: health,
+            isScanning: true
+        ).noticeText == "正在追平 Token 日志 · 1 / 3 当前可用"
+    )
+}
+
 @Test func menuBarStatusFormatsQuotaCycleTokenUsage() {
     let measured = MenuBarStatus(
         totalSessions: 1,
@@ -53,8 +88,10 @@ import Testing
         isRefreshing: false
     )
 
-    #expect(measured.compactTokenText == "已用 12亿")
-    #expect(missing.compactTokenText == "已用 --")
+    #expect(measured.compactTokenText == "本期 12亿")
+    #expect(measured.quotaCycleTokenDetailText == "本额度周期本地 Token 1,200,000,000")
+    #expect(missing.compactTokenText == "本期 --")
+    #expect(missing.quotaCycleTokenDetailText == "本额度周期本地 Token --")
 }
 
 @Test func resetCreditsStatusSortsAvailableCardsAndFormatsLocalExpiration() {
@@ -138,8 +175,8 @@ import Testing
     #expect(status.totalTokenValueText == "57亿")
     #expect(status.totalTokenDetailText == "5,700,000,000 Token")
     #expect(status.averageValueText == "1511万")
-    #expect(status.cachedInputValueText == "52亿")
-    #expect(status.cachedInputDetailText == "5,200,000,000 Token")
+    #expect(status.nonCachedTokenValueText == "5亿")
+    #expect(status.nonCachedTokenDetailText == "500,000,000 Token")
     #expect(status.topProjects.count == 5)
     #expect(status.projectFraction(status.topProjects[0]) == 1)
 }
@@ -364,6 +401,13 @@ import Testing
     )
 
     #expect(status.compactQuotaText == "周剩 48%")
+    #expect(
+        status.coreDetailTexts == [
+            "Codex 周配额剩余 48%",
+            "本额度周期本地 Token --",
+            "会话总数 400",
+        ]
+    )
     #expect(status.account.planText == "--")
     #expect(status.weeklyQuota.remainingText == "48% 剩余")
     #expect(status.weeklyQuota.fraction == 0.48)
@@ -470,7 +514,7 @@ import Testing
     #expect(status.weeklyQuota.resetAtText == "重置时间 --")
 }
 
-@Test func dailyTokenUsagePresentationBuildsOrderedSevenDayDomain() {
+@Test func dailyTokenUsagePresentationBuildsOrderedSevenDayFallbackDomain() {
     let calendar = quotaChartCalendar()
     let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
     let expected = (15...21).map {
@@ -478,7 +522,58 @@ import Testing
     }
 
     #expect(
-        DailyTokenUsagePresentation.dayDomain(now: now, calendar: calendar) == expected
+        DailyTokenUsagePresentation.dayDomain(
+            startingAt: nil,
+            now: now,
+            calendar: calendar
+        ) == expected
+    )
+}
+
+@Test func dailyTokenUsagePresentationIncludesQuotaCyclesFirstPartialDay() {
+    let calendar = quotaChartCalendar()
+    let startingAt = quotaChartTimestamp(
+        2026,
+        7,
+        14,
+        hour: 14,
+        calendar: calendar
+    )
+    let now = quotaChartTimestamp(2026, 7, 21, hour: 12, calendar: calendar)
+    let expected = (14...21).map {
+        quotaChartTimestamp(2026, 7, $0, calendar: calendar)
+    }
+
+    #expect(
+        DailyTokenUsagePresentation.dayDomain(
+            startingAt: startingAt,
+            now: now,
+            calendar: calendar
+        ) == expected
+    )
+}
+
+@Test func dailyTokenUsagePresentationAdvancesQuotaCycleByLocalDayAcrossDST() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+    let startingAt = quotaChartTimestamp(
+        2026,
+        3,
+        7,
+        hour: 14,
+        calendar: calendar
+    )
+    let now = quotaChartTimestamp(2026, 3, 10, hour: 12, calendar: calendar)
+    let expected = (7...10).map {
+        quotaChartTimestamp(2026, 3, $0, calendar: calendar)
+    }
+
+    #expect(
+        DailyTokenUsagePresentation.dayDomain(
+            startingAt: startingAt,
+            now: now,
+            calendar: calendar
+        ) == expected
     )
 }
 
@@ -504,8 +599,7 @@ import Testing
     #expect(DailyTokenUsagePresentation.exactTokenText(12_345) == "12,345 Token")
     #expect(DailyTokenUsagePresentation.emptyText == "暂无每日 Token 记录")
     #expect(
-        DailyTokenUsagePresentation.observationCaption
-            == "按本机可读取的 Codex 会话记录统计，不代表服务端额度消耗"
+        DailyTokenUsagePresentation.observationCaption == TokenUsageDefinition.explanation
     )
 }
 
@@ -515,6 +609,8 @@ import Testing
         dailyTokenPoint(dayStart: 200, totalTokens: 2),
     ]
 
+    #expect(DailyTokenUsageSelection.defaultDay(in: points) == 200)
+    #expect(DailyTokenUsageSelection.defaultDay(in: []) == nil)
     #expect(DailyTokenUsageSelection.reconcile(selectedDay: nil, in: points) == nil)
     #expect(DailyTokenUsageSelection.reconcile(selectedDay: 100, in: points) == 100)
     #expect(DailyTokenUsageSelection.reconcile(selectedDay: 300, in: points) == nil)

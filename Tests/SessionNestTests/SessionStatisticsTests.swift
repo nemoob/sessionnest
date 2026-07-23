@@ -5,6 +5,174 @@ import Testing
 
 @Suite("SessionStatisticsTests")
 struct SessionStatisticsTests {
+    @Test func persistedSnapshotInputKeyIsStableAndInvalidatesEveryStatisticInput() throws {
+        let now: Int64 = 1_000
+        let covered = thread("covered", activityTimestamp: 900)
+        let originalUsage = daily(
+            covered.id,
+            day: 800,
+            usage: usage(100, 80, 20, 5, 120)
+        )
+        func key(
+            threads: [CodexThread]? = nil,
+            coveredThreadIDs: Set<String>? = nil,
+            dailyUsage: [ThreadTokenDailyUsage]? = nil,
+            projectPath: String = "/work/project",
+            usageAttributionThreadIDs: [String: String]? = nil,
+            dayStart: Int64 = 0,
+            timeZoneIdentifier: String = "UTC"
+        ) -> String? {
+            let threads = threads ?? [covered]
+            return StatisticsSnapshotPersistence.inputKey(
+                threads: threads,
+                coveredThreadIDs: coveredThreadIDs ?? [covered.id],
+                dailyUsage: dailyUsage ?? [originalUsage],
+                projectAssignments: threads.map {
+                    StatisticsSnapshotProjectAssignment(
+                        threadID: $0.id,
+                        projectPath: projectPath
+                    )
+                },
+                usageAttributionThreadIDs: usageAttributionThreadIDs
+                    ?? [covered.id: covered.id],
+                dayStart: dayStart,
+                timeZoneIdentifier: timeZoneIdentifier,
+                now: now
+            )
+        }
+
+        let original = try #require(key())
+        #expect(original == key())
+        #expect(
+            original
+                != key(
+                    dailyUsage: [
+                        daily(
+                            covered.id,
+                            day: 800,
+                            usage: usage(101, 80, 20, 5, 121)
+                        )
+                    ])
+        )
+        #expect(original != key(projectPath: "/work/other"))
+        #expect(original != key(coveredThreadIDs: []))
+        #expect(original != key(usageAttributionThreadIDs: [covered.id: "other"]))
+        #expect(original != key(dayStart: 1))
+        #expect(original != key(timeZoneIdentifier: "Asia/Shanghai"))
+        #expect(
+            original
+                != key(
+                    threads: [
+                        thread(
+                            covered.id,
+                            title: "Changed",
+                            activityTimestamp: covered.activityTimestamp
+                        )
+                    ])
+        )
+        #expect(
+            key(
+                threads: [thread("future", activityTimestamp: now + 1)],
+                coveredThreadIDs: [],
+                dailyUsage: [],
+                usageAttributionThreadIDs: [:]
+            ) == nil
+        )
+    }
+
+    @Test func tokenUsageAnomalyDetectsMaterialDoubleAndZeroForStableTargets() {
+        let targetIDs: Set<String> = ["parent", "child"]
+        let previous = TokenUsageScanSnapshot(
+            targetIDs: targetIDs,
+            totalTokens: 100_000
+        )
+
+        #expect(
+            TokenUsageAnomalyDetector.detect(
+                previous: previous,
+                current: TokenUsageScanSnapshot(targetIDs: targetIDs, totalTokens: 200_000)
+            ) == .doubled(previous: 100_000, current: 200_000)
+        )
+        #expect(
+            TokenUsageAnomalyDetector.detect(
+                previous: previous,
+                current: TokenUsageScanSnapshot(targetIDs: targetIDs, totalTokens: 0)
+            ) == .droppedToZero(previous: 100_000)
+        )
+    }
+
+    @Test func tokenUsageAnomalyIgnoresFirstChangedScopeAndNormalGrowth() {
+        let targetIDs: Set<String> = ["parent"]
+        let previous = TokenUsageScanSnapshot(targetIDs: targetIDs, totalTokens: 100_000)
+
+        #expect(
+            TokenUsageAnomalyDetector.detect(
+                previous: nil,
+                current: TokenUsageScanSnapshot(targetIDs: targetIDs, totalTokens: 0)
+            ) == nil
+        )
+        #expect(
+            TokenUsageAnomalyDetector.detect(
+                previous: previous,
+                current: TokenUsageScanSnapshot(targetIDs: ["new-parent"], totalTokens: 0)
+            ) == nil
+        )
+        #expect(
+            TokenUsageAnomalyDetector.detect(
+                previous: previous,
+                current: TokenUsageScanSnapshot(targetIDs: targetIDs, totalTokens: 199_999)
+            ) == nil
+        )
+        #expect(
+            TokenUsageAnomalyDetector.detect(
+                previous: TokenUsageScanSnapshot(targetIDs: targetIDs, totalTokens: 10),
+                current: TokenUsageScanSnapshot(targetIDs: targetIDs, totalTokens: 20)
+            ) == nil
+        )
+    }
+
+    @Test func tokenUsageScanSnapshotCountsOnlyCoveredTargetsAndSaturatesOverflow() {
+        let snapshot = TokenUsageScanSnapshot.build(
+            dailyUsage: [
+                daily("covered", day: 100, usage: usage(0, 0, 0, 0, .max)),
+                daily("covered", day: 200, usage: usage(0, 0, 0, 0, 1)),
+                daily("uncovered", day: 100, usage: usage(0, 0, 0, 0, 500)),
+            ],
+            coveredTargetIDs: ["covered"],
+            targetIDs: ["covered", "uncovered"]
+        )
+
+        #expect(snapshot.totalTokens == .max)
+        #expect(snapshot.targetIDs == ["covered", "uncovered"])
+    }
+
+    @Test func coverageReasonsCountSessionsInsteadOfChildLogs() {
+        let breakdown = TokenCoverageBreakdown.build(
+            eligibleSessionIDs: ["measured", "missing", "empty", "stale", "failed"],
+            measuredSessionIDs: ["measured"],
+            usageAttributionThreadIDs: [
+                "measured-child": "measured",
+                "empty-parent": "empty",
+                "stale-child": "stale",
+                "failed-parent": "failed",
+                "failed-child": "failed",
+            ],
+            health: TokenScanHealth(
+                freshTargetIDs: ["empty-parent"],
+                staleTargetIDs: ["measured-child", "stale-child"],
+                failedTargetIDs: ["failed-parent", "failed-child"]
+            )
+        )
+
+        #expect(breakdown.totalSessionCount == 5)
+        #expect(breakdown.measuredSessionCount == 1)
+        #expect(breakdown.unmeasuredSessionCount == 4)
+        #expect(breakdown.missingLogSessionCount == 1)
+        #expect(breakdown.emptyLogSessionCount == 1)
+        #expect(breakdown.staleLogSessionCount == 1)
+        #expect(breakdown.failedLogSessionCount == 1)
+    }
+
     @Test func explicitCutoffExcludesEarlierSessionsAndUsage() {
         let calendar = calendar(timeZone: "UTC")
         let cutoff = timestamp(2026, 7, 15, calendar: calendar)
@@ -103,6 +271,7 @@ struct SessionStatisticsTests {
 
         #expect(snapshot.totalSessionCount == 1)
         #expect(snapshot.measuredSessionCount == 1)
+        #expect(snapshot.eligibleSessionIDs == [included.id])
         #expect(snapshot.totalUsage == usage(10, 5, 2, 1, 12))
         #expect(snapshot.dailyPoints.map(\.dayStart) == [cutoff])
     }
@@ -135,6 +304,102 @@ struct SessionStatisticsTests {
         #expect(snapshot.measuredSessionCount == 1)
         #expect(snapshot.totalUsage == usage(30, 10, 5, 2, 35))
         #expect(snapshot.dailyPoints.map(\.dayStart) == [cutoff])
+    }
+
+    @Test func ninetyDayRangeUsesInclusiveLocalDayBoundary() {
+        let calendar = calendar(timeZone: "Asia/Shanghai")
+        let now = timestamp(2026, 7, 23, hour: 12, calendar: calendar)
+        let cutoff = timestamp(2026, 4, 25, calendar: calendar)
+        let included = thread("included", activityTimestamp: cutoff)
+        let excluded = thread("excluded", activityTimestamp: cutoff - 1)
+
+        let snapshot = SessionStatistics.build(
+            threads: [included, excluded],
+            coveredThreadIDs: [included.id, excluded.id],
+            dailyUsage: [
+                daily(included.id, day: cutoff, usage: usage(40, 20, 8, 4, 48)),
+                daily(
+                    excluded.id,
+                    day: cutoff - 86_400,
+                    usage: usage(90, 80, 10, 8, 100)
+                ),
+            ],
+            threadProjects: [:],
+            timeFilter: .ninetyDays,
+            calendar: calendar,
+            now: now
+        )
+
+        #expect(snapshot.eligibleSessionIDs == [included.id])
+        #expect(snapshot.totalUsage == usage(40, 20, 8, 4, 48))
+        #expect(snapshot.dailyPoints.map(\.dayStart) == [cutoff])
+    }
+
+    @Test func customDateRangeIsInclusiveAndKeepsUsageFromLaterUpdatedSession() throws {
+        let calendar = calendar(timeZone: "America/New_York")
+        let start = timestamp(2026, 3, 7, calendar: calendar)
+        let end = timestamp(2026, 3, 9, calendar: calendar)
+        let now = timestamp(2026, 3, 20, hour: 12, calendar: calendar)
+        let laterUpdated = thread("later", activityTimestamp: now)
+        let missingInRange = thread(
+            "missing",
+            activityTimestamp: timestamp(2026, 3, 8, hour: 12, calendar: calendar)
+        )
+        let range = try #require(
+            StatisticsDateRange(
+                from: Date(timeIntervalSince1970: TimeInterval(start)),
+                through: Date(timeIntervalSince1970: TimeInterval(end)),
+                calendar: calendar
+            )
+        )
+
+        let snapshot = SessionStatistics.build(
+            threads: [laterUpdated, missingInRange],
+            coveredThreadIDs: [laterUpdated.id],
+            dailyUsage: [
+                daily(
+                    laterUpdated.id,
+                    day: timestamp(2026, 3, 6, calendar: calendar),
+                    usage: usage(100, 50, 20, 10, 120)
+                ),
+                daily(laterUpdated.id, day: start, usage: usage(10, 5, 2, 1, 12)),
+                daily(laterUpdated.id, day: end, usage: usage(20, 10, 4, 2, 24)),
+                daily(
+                    laterUpdated.id,
+                    day: timestamp(2026, 3, 10, calendar: calendar),
+                    usage: usage(200, 100, 40, 20, 240)
+                ),
+            ],
+            threadProjects: [:],
+            dateRange: range,
+            calendar: calendar,
+            now: now
+        )
+
+        #expect(snapshot.eligibleSessionIDs == [laterUpdated.id, missingInRange.id])
+        #expect(snapshot.measuredSessionCount == 1)
+        #expect(snapshot.totalUsage == usage(30, 15, 6, 3, 36))
+        #expect(snapshot.dailyPoints.map(\.dayStart) == [start, end])
+        #expect(snapshot.sessionRows.map(\.threadID) == [laterUpdated.id])
+
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = try #require(TimeZone(identifier: "UTC"))
+        let resolvedDates = try #require(range.resolvedDates(calendar: utcCalendar))
+        #expect(
+            Int64(resolvedDates.start.timeIntervalSince1970)
+                == timestamp(2026, 3, 7, calendar: utcCalendar)
+        )
+        #expect(
+            Int64(resolvedDates.end.timeIntervalSince1970)
+                == timestamp(2026, 3, 9, calendar: utcCalendar)
+        )
+        #expect(
+            StatisticsDateRange(
+                from: Date(timeIntervalSince1970: TimeInterval(end)),
+                through: Date(timeIntervalSince1970: TimeInterval(start)),
+                calendar: calendar
+            ) == nil
+        )
     }
 
     @Test func rangeUsageExcludesThreadsWithActivityBeforeCutoff() {
@@ -401,6 +666,50 @@ struct SessionStatisticsTests {
         #expect(noProjectRow?.projectPath == nil)
         #expect(noProjectRow?.projectName == "无项目")
         #expect(noProjectRow?.usage.totalTokens == 50)
+    }
+
+    @Test func projectDrilldownFiltersSessionsByExactPath() {
+        let first = StatisticsSessionRow(
+            threadID: "first",
+            title: "First",
+            projectPath: "/work/first/app",
+            projectName: "app",
+            workingDirectory: "/work/first/app",
+            usage: usage(80, 50, 20, 10, 100)
+        )
+        let second = StatisticsSessionRow(
+            threadID: "second",
+            title: "Second",
+            projectPath: "/work/second/app",
+            projectName: "app",
+            workingDirectory: "/work/second/app",
+            usage: usage(40, 20, 10, 5, 50)
+        )
+        let noProject = StatisticsSessionRow(
+            threadID: "no-project",
+            title: "No Project",
+            projectPath: nil,
+            projectName: "无项目",
+            workingDirectory: "/tmp/session",
+            usage: usage(20, 10, 5, 2, 25)
+        )
+        let snapshot = StatisticsSnapshot(
+            totalUsage: usage(140, 80, 35, 17, 175),
+            totalSessionCount: 3,
+            measuredSessionCount: 3,
+            averageTokensPerMeasuredSession: 58,
+            dailyPoints: [],
+            projectRows: [],
+            sessionRows: [first, second, noProject]
+        )
+
+        #expect(
+            snapshot.sessionRows(forProjectPath: nil).map(\.threadID) == [
+                "first", "second", "no-project",
+            ])
+        #expect(snapshot.sessionRows(forProjectPath: "/work/first/app") == [first])
+        #expect(snapshot.sessionRows(forProjectPath: "/work/second/app") == [second])
+        #expect(snapshot.sessionRows(forProjectPath: "/work/missing/app").isEmpty)
     }
 
     @Test func childOnlyUsageIsMeasuredAndAttributedToItsVisibleParent() {

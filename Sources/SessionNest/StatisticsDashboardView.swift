@@ -3,22 +3,40 @@ import SwiftUI
 
 struct StatisticsDashboardView: View {
     @ObservedObject var model: SessionListModel
+    @State private var customStatisticsRange: StatisticsDateRange?
+    @State private var showsCustomStatisticsRange = false
+    @State private var customStartDate =
+        Calendar.current.date(byAdding: .day, value: -29, to: Date()) ?? Date()
+    @State private var customEndDate = Date()
+    @State private var showsTokenRecalculation = false
+    @State private var recalculationStartDate =
+        Calendar.current.date(byAdding: .day, value: -6, to: Date()) ?? Date()
+    @State private var recalculationEndDate = Date()
+    @State private var selectedProjectPath: String?
 
     var body: some View {
-        let snapshot = model.statisticsSnapshot
-        let tokenScanHealth = TokenScanHealthStatus(
+        let snapshot =
+            customStatisticsRange.map {
+                model.statisticsSnapshot(for: $0)
+            } ?? model.statisticsSnapshot
+        let tokenCoverage = TokenCoverageStatus(
+            breakdown: model.tokenCoverageBreakdown(for: snapshot),
             health: model.tokenScanHealth,
             isScanning: model.isScanningTokenUsage
         )
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                metricGrid(snapshot: snapshot)
+                metricGrid(snapshot: snapshot, tokenCoverage: tokenCoverage)
 
-                if model.isScanningTokenUsage || tokenScanHealth.isWarning
+                if let anomaly = model.tokenUsageAnomaly {
+                    anomalyNotice(anomaly)
+                }
+
+                if model.isScanningTokenUsage || tokenCoverage.isWarning
                     || snapshot.measuredSessionCount < snapshot.totalSessionCount
                 {
-                    coverageNotice(tokenScanHealth)
+                    coverageNotice(tokenCoverage)
                 }
 
                 if snapshot.measuredSessionCount == 0 {
@@ -29,20 +47,33 @@ struct StatisticsDashboardView: View {
                     sessionUsage(snapshot: snapshot)
                 }
 
-                Text(
-                    "Token 数据只从本机 Codex 会话文件读取并缓存在此 App 中，不会修改会话内容。缓存输入属于输入 Token，推理 Token 属于输出 Token，均不会重复计入总量。"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                Text(TokenUsageDefinition.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(20)
         }
+        .onChange(of: snapshot.projectRows.map(\.projectPath)) { _, projectPaths in
+            guard let selectedProjectPath, !projectPaths.contains(selectedProjectPath) else {
+                return
+            }
+            self.selectedProjectPath = nil
+        }
         .navigationTitle("统计概览")
         .toolbar { toolbarContent }
+        .sheet(isPresented: $showsCustomStatisticsRange) {
+            customStatisticsRangeSheet
+        }
+        .sheet(isPresented: $showsTokenRecalculation) {
+            tokenRecalculationSheet
+        }
     }
 
-    private func metricGrid(snapshot: StatisticsSnapshot) -> some View {
+    private func metricGrid(
+        snapshot: StatisticsSnapshot,
+        tokenCoverage: TokenCoverageStatus
+    ) -> some View {
         LazyVGrid(
             columns: [GridItem(.adaptive(minimum: 250), spacing: 12)],
             spacing: 12
@@ -50,7 +81,7 @@ struct StatisticsDashboardView: View {
             metricCard(
                 title: "会话",
                 value: snapshot.totalSessionCount.formatted(),
-                detail: "已统计 \(snapshot.measuredSessionCount) / \(snapshot.totalSessionCount)"
+                detail: tokenCoverage.metricDetailText
             )
             metricCard(
                 title: "总 Token",
@@ -65,40 +96,47 @@ struct StatisticsDashboardView: View {
                     : "按已统计会话计算"
             )
             metricCard(
-                title: "缓存输入",
-                value: compact(snapshot.totalUsage.cachedInputTokens),
-                detail: exact(snapshot.totalUsage.cachedInputTokens)
+                title: "非缓存 Token",
+                value: compact(snapshot.totalUsage.nonCachedTokens),
+                detail: exact(snapshot.totalUsage.nonCachedTokens)
             )
         }
     }
 
-    private func coverageNotice(_ tokenScanHealth: TokenScanHealthStatus) -> some View {
+    private func anomalyNotice(_ anomaly: TokenUsageAnomaly) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+            Text(anomaly.noticeText)
+                .font(.callout)
+            Spacer()
+        }
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func coverageNotice(_ tokenCoverage: TokenCoverageStatus) -> some View {
         HStack(spacing: 8) {
             if model.isLoading || model.isScanningTokenUsage {
                 ProgressView()
                     .controlSize(.small)
-            } else if tokenScanHealth.isWarning {
+            } else if tokenCoverage.isWarning {
                 Image(systemName: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
             } else {
                 Image(systemName: "info.circle")
                     .foregroundStyle(.secondary)
             }
-            Text(
-                model.isScanningTokenUsage
-                    ? tokenScanHealth.text
-                    : tokenScanHealth.isWarning
-                        ? tokenScanHealth.text
-                        : "部分会话没有可读取的 Token 记录，因此不会按 0 计入平均值。"
-            )
-            .font(.callout)
-            .foregroundStyle(tokenScanHealth.isWarning ? Color.orange : Color.secondary)
+            Text(tokenCoverage.noticeText)
+                .font(.callout)
+                .foregroundStyle(tokenCoverage.isWarning ? Color.orange : Color.secondary)
             Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(
-            (tokenScanHealth.isWarning ? Color.orange : Color.accentColor).opacity(0.08),
+            (tokenCoverage.isWarning ? Color.orange : Color.accentColor).opacity(0.08),
             in: RoundedRectangle(cornerRadius: 10)
         )
     }
@@ -138,18 +176,29 @@ struct StatisticsDashboardView: View {
 
         return dashboardSection(
             title: "项目 Token 排行",
-            subtitle: "当前时间范围内总 Token 最高的前 10 个项目；不含“无项目”会话"
+            subtitle: "单击项目条形图可下钻会话；展示总 Token 最高的前 10 个项目"
         ) {
             Chart(topProjects) { project in
                 BarMark(
                     x: .value("Token", project.usage.totalTokens),
                     y: .value("项目目录", project.projectPath)
                 )
-                .foregroundStyle(Color.accentColor.gradient)
+                .foregroundStyle(
+                    Color.accentColor.opacity(
+                        selectedProjectPath == nil || selectedProjectPath == project.projectPath
+                            ? 1 : 0.25
+                    ).gradient
+                )
                 .annotation(position: .trailing, alignment: .leading) {
-                    Text(compact(project.usage.totalTokens))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text(compact(project.usage.totalTokens))
+                        if selectedProjectPath == project.projectPath {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
             .chartYAxis {
@@ -176,13 +225,40 @@ struct StatisticsDashboardView: View {
                 }
             }
             .frame(height: max(220, CGFloat(topProjects.count) * 30))
+            .chartYSelection(value: $selectedProjectPath)
             .accessibilityLabel("项目 Token 排行")
+            .accessibilityHint("选择项目后，会话用量仅显示该项目")
         }
     }
 
     private func sessionUsage(snapshot: StatisticsSnapshot) -> some View {
-        dashboardSection(title: "会话用量", subtitle: "双击会话行任意位置可在 Codex 中打开") {
-            Table(snapshot.sessionRows) {
+        let selectedProject = selectedProjectPath.flatMap { projectPath in
+            snapshot.projectRows.first { $0.projectPath == projectPath }
+        }
+        let rows = snapshot.sessionRows(forProjectPath: selectedProject?.projectPath)
+        let subtitle =
+            selectedProject.map {
+                "已下钻到 \($0.projectName) 的 \(rows.count) 个会话；双击可在 Codex 中打开"
+            } ?? "双击会话行任意位置可在 Codex 中打开"
+
+        return dashboardSection(title: "会话用量", subtitle: subtitle) {
+            if let selectedProject {
+                HStack(spacing: 8) {
+                    Label(selectedProject.projectName, systemImage: "folder.fill")
+                        .font(.callout.weight(.semibold))
+                    Text(selectedProject.projectPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(selectedProject.projectPath)
+                    Spacer()
+                    Button("显示全部会话") {
+                        selectedProjectPath = nil
+                    }
+                }
+            }
+
+            Table(rows) {
                 TableColumn("会话") { row in
                     Text(row.title)
                         .lineLimit(1)
@@ -253,13 +329,31 @@ struct StatisticsDashboardView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup {
-            Picker("时间", selection: $model.timeFilter) {
+            Menu {
                 ForEach(SessionTimeFilter.allCases, id: \.self) { filter in
-                    Text(filter.rawValue).tag(filter)
+                    Button {
+                        model.timeFilter = filter
+                        customStatisticsRange = nil
+                    } label: {
+                        if customStatisticsRange == nil, model.timeFilter == filter {
+                            Label(filter.rawValue, systemImage: "checkmark")
+                        } else {
+                            Text(filter.rawValue)
+                        }
+                    }
                 }
+                Divider()
+                Button {
+                    showsCustomStatisticsRange = true
+                } label: {
+                    Label(
+                        "自定义…",
+                        systemImage: customStatisticsRange == nil ? "calendar" : "checkmark"
+                    )
+                }
+            } label: {
+                Label(statisticsRangeTitle, systemImage: "calendar")
             }
-            .labelsHidden()
-            .frame(width: 120)
             .help("选择统计时间范围")
 
             if model.isLoading || model.isScanningTokenUsage {
@@ -267,6 +361,14 @@ struct StatisticsDashboardView: View {
                     .controlSize(.small)
                     .help(model.isLoading ? "正在加载会话" : "正在统计 Token")
             }
+
+            Button {
+                showsTokenRecalculation = true
+            } label: {
+                Label("重新统计…", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .help("按本地日期范围从原始日志重新统计 Token")
+            .disabled(model.isLoading || model.isScanningTokenUsage)
 
             Button {
                 Task { await model.reload() }
@@ -277,6 +379,112 @@ struct StatisticsDashboardView: View {
             // Token 扫描尚未完成时禁止重新加载，避免取消并重启同一批日志工作。
             .disabled(model.isLoading || model.isScanningTokenUsage)
         }
+    }
+
+    private var statisticsRangeTitle: String {
+        guard let customStatisticsRange else { return model.timeFilter.rawValue }
+        guard let dates = customStatisticsRange.resolvedDates(calendar: .current) else {
+            return "自定义范围"
+        }
+        return
+            "\(dates.start.formatted(date: .numeric, time: .omitted)) – "
+            + dates.end.formatted(date: .numeric, time: .omitted)
+    }
+
+    private var customStatisticsRangeSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("自定义统计范围")
+                .font(.title3.weight(.semibold))
+            Text("按本地自然日查看所选闭区间内的 Token、项目和会话统计，不重新读取原始日志。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            DatePicker(
+                "开始日期",
+                selection: $customStartDate,
+                in: ...Date(),
+                displayedComponents: .date
+            )
+            DatePicker(
+                "结束日期",
+                selection: $customEndDate,
+                in: ...Date(),
+                displayedComponents: .date
+            )
+
+            if proposedCustomStatisticsRange == nil {
+                Text("开始日期不能晚于结束日期。")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) {
+                    showsCustomStatisticsRange = false
+                }
+                Button("应用") {
+                    guard let range = proposedCustomStatisticsRange else { return }
+                    customStatisticsRange = range
+                    showsCustomStatisticsRange = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(proposedCustomStatisticsRange == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 390)
+    }
+
+    private var proposedCustomStatisticsRange: StatisticsDateRange? {
+        StatisticsDateRange(from: customStartDate, through: customEndDate)
+    }
+
+    private var tokenRecalculationSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("重新统计 Token")
+                .font(.title3.weight(.semibold))
+            Text("重新读取原始 JSONL，并只替换所选本地自然日内的派生统计；日志本身有变化时仍会完整同步。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            DatePicker(
+                "开始日期",
+                selection: $recalculationStartDate,
+                in: ...Date(),
+                displayedComponents: .date
+            )
+            DatePicker(
+                "结束日期",
+                selection: $recalculationEndDate,
+                in: ...Date(),
+                displayedComponents: .date
+            )
+
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) {
+                    showsTokenRecalculation = false
+                }
+                Button("重新统计") {
+                    let startDate = recalculationStartDate
+                    let endDate = recalculationEndDate
+                    showsTokenRecalculation = false
+                    Task {
+                        await model.recalculateTokenUsage(
+                            from: startDate,
+                            through: endDate
+                        )
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(recalculationStartDate > recalculationEndDate)
+            }
+        }
+        .padding(20)
+        .frame(width: 390)
     }
 
     private func metricCard(title: String, value: String, detail: String) -> some View {

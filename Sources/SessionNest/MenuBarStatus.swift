@@ -204,6 +204,64 @@ struct TokenScanHealthStatus: Equatable {
     }
 }
 
+struct TokenCoverageStatus: Equatable {
+    let metricDetailText: String
+    let noticeText: String
+    let isWarning: Bool
+
+    init(
+        breakdown: TokenCoverageBreakdown,
+        health: TokenScanHealth,
+        isScanning: Bool
+    ) {
+        let coveragePercent =
+            breakdown.totalSessionCount == 0
+            ? 0
+            : Int(
+                (Double(breakdown.measuredSessionCount)
+                    / Double(breakdown.totalSessionCount) * 100).rounded()
+            )
+        metricDetailText =
+            "已统计 \(breakdown.measuredSessionCount) / \(breakdown.totalSessionCount)"
+            + "（\(coveragePercent)%）"
+
+        if isScanning {
+            noticeText = TokenScanHealthStatus(health: health, isScanning: true).text
+            isWarning = false
+            return
+        }
+        guard breakdown.totalSessionCount > 0 else {
+            noticeText = "当前范围内没有会话"
+            isWarning = false
+            return
+        }
+        guard breakdown.unmeasuredSessionCount > 0 else {
+            let scanStatus = TokenScanHealthStatus(health: health, isScanning: false)
+            noticeText =
+                scanStatus.isWarning
+                ? scanStatus.text
+                : "全部会话均有可用 Token 统计"
+            isWarning = scanStatus.isWarning
+            return
+        }
+
+        let reasons = [
+            Self.reason("未发现日志", count: breakdown.missingLogSessionCount),
+            Self.reason("无 Token 事件", count: breakdown.emptyLogSessionCount),
+            Self.reason("日志待更新", count: breakdown.staleLogSessionCount),
+            Self.reason("扫描失败", count: breakdown.failedLogSessionCount),
+        ].compactMap { $0 }
+        noticeText =
+            "未统计 \(breakdown.unmeasuredSessionCount) 个会话："
+            + reasons.joined(separator: "、")
+        isWarning = breakdown.staleLogSessionCount > 0 || breakdown.failedLogSessionCount > 0
+    }
+
+    private static func reason(_ title: String, count: Int) -> String? {
+        count > 0 ? "\(title) \(count)" : nil
+    }
+}
+
 struct MenuBarStatisticsStatus {
     let sessionValueText: String
     let sessionDetailText: String
@@ -211,8 +269,8 @@ struct MenuBarStatisticsStatus {
     let totalTokenDetailText: String
     let averageValueText: String
     let averageDetailText: String
-    let cachedInputValueText: String
-    let cachedInputDetailText: String
+    let nonCachedTokenValueText: String
+    let nonCachedTokenDetailText: String
     let dailyPoints: [StatisticsDailyPoint]
     let topProjects: [StatisticsProjectRow]
     let showsTokenScanProgress: Bool
@@ -237,11 +295,11 @@ struct MenuBarStatisticsStatus {
             snapshot.measuredSessionCount == 0
             ? "暂无已统计会话"
             : "按已统计会话计算"
-        cachedInputValueText = snapshot.totalUsage.cachedInputTokens.formatted(
+        nonCachedTokenValueText = snapshot.totalUsage.nonCachedTokens.formatted(
             chineseCompactNumberFormat
         )
-        cachedInputDetailText =
-            "\(snapshot.totalUsage.cachedInputTokens.formatted()) Token"
+        nonCachedTokenDetailText =
+            "\(snapshot.totalUsage.nonCachedTokens.formatted()) Token"
         dailyPoints = snapshot.dailyPoints
         topProjects = Array(snapshot.projectRows.prefix(5))
         showsTokenScanProgress = isScanningTokenUsage
@@ -275,6 +333,7 @@ struct MenuBarStatus {
     let quotaFraction: Double
     let sessionTotalText: String
     let quotaDetailText: String
+    let quotaCycleTokenDetailText: String
     let showsProgress: Bool
     let account: MenuBarAccountStatus
     let weeklyQuota: MenuBarQuotaStatus
@@ -284,6 +343,10 @@ struct MenuBarStatus {
 
     var quotaColor: MenuBarQuotaColor {
         weeklyQuota.color
+    }
+
+    var coreDetailTexts: [String] {
+        [quotaDetailText, quotaCycleTokenDetailText, sessionTotalText]
     }
 
     init(
@@ -330,11 +393,15 @@ struct MenuBarStatus {
         compactQuotaText = "周剩 \(quotaText)"
         compactTokenText =
             quotaCycleTokens.map {
-                "已用 \($0.formatted(chineseCompactNumberFormat))"
-            } ?? "已用 --"
+                "本期 \($0.formatted(chineseCompactNumberFormat))"
+            } ?? "本期 --"
         quotaFraction = Double(weeklyRemaining ?? 0) / 100
         sessionTotalText = isInitialLoading ? "会话 …" : "会话总数 \(totalSessions)"
         quotaDetailText = "Codex 周配额剩余 \(quotaText)"
+        quotaCycleTokenDetailText =
+            quotaCycleTokens.map {
+                "本额度周期本地 Token \($0.formatted())"
+            } ?? "本额度周期本地 Token --"
         showsProgress = isLoading || isRefreshing
         self.account = MenuBarAccountStatus(
             account: account,

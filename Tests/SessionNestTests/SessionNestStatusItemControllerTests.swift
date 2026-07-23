@@ -20,11 +20,14 @@ import Testing
 @Test func refreshButtonStaysVisuallyEnabledWhileAnimating() {
     let idle = RefreshButtonVisualState(isRefreshing: false)
     let refreshing = RefreshButtonVisualState(isRefreshing: true)
+    let hidden = RefreshButtonVisualState(isRefreshing: true, isVisible: false)
 
     #expect(idle.isVisuallyEnabled)
     #expect(!idle.isAnimating)
     #expect(refreshing.isVisuallyEnabled)
     #expect(refreshing.isAnimating)
+    #expect(hidden.isVisuallyEnabled)
+    #expect(!hidden.isAnimating)
 }
 
 @Test func screenshotFeedbackUsesClearClipboardMessagesAndSymbols() {
@@ -61,6 +64,129 @@ import Testing
     #expect(StatusPopoverScreenshotPrivacy.safe.emailText(email) == "账号已隐藏")
     #expect(StatusPopoverScreenshotPrivacy.full.emailText(email) == email)
     #expect(StatusPopoverScreenshotPrivacy.safe.emailText("--") == "--")
+}
+
+@Test func redactedDiagnosticReportContainsOnlyShareableCountsAndEnvironment() {
+    let coverage = TokenCoverageBreakdown(
+        totalSessionCount: 10,
+        measuredSessionCount: 6,
+        missingLogSessionCount: 1,
+        emptyLogSessionCount: 1,
+        staleLogSessionCount: 1,
+        failedLogSessionCount: 1
+    )
+    let diagnostics = TokenScanDiagnostics(
+        completedAt: Date(timeIntervalSince1970: 1_720_000_001),
+        duration: 0.125,
+        discoveryEnumeratedFileCount: 12,
+        discoveryCacheHitCount: 9,
+        discoveryReadFileCount: 3,
+        discoveryReadBytes: 4_096,
+        discoveryFailedReadCount: 1,
+        discoveryCacheStoreFailed: false,
+        targetCount: 8,
+        tokenCacheReuseCount: 6,
+        tokenReadFileCount: 2,
+        tokenReadBytes: 8_192,
+        duplicateTokenCheckpointCount: 4,
+        tokenReconciliationCount: 1,
+        failedTargetCount: 1,
+        prunedTimedRowCount: 7
+    )
+    let report = SessionNestDiagnosticReport(
+        generatedAt: Date(timeIntervalSince1970: 1_720_000_000),
+        appVersion: "0.2.28",
+        appBuild: "28",
+        operatingSystemVersion: "macOS 15.5 (Build 24F74)",
+        timeZoneIdentifier: "Asia/Shanghai",
+        coverage: coverage,
+        diagnostics: diagnostics,
+        anomaly: .doubled(previous: 100_000, current: 200_000)
+    ).text
+
+    #expect(report.contains("app_version=0.2.28"))
+    #expect(report.contains("time_zone=Asia/Shanghai"))
+    #expect(report.contains("coverage.measured_sessions=6"))
+    #expect(report.contains("coverage.failed_log_sessions=1"))
+    #expect(report.contains("scan.duration_ms=125"))
+    #expect(report.contains("scan.token.duplicate_checkpoints=4"))
+    #expect(
+        report.contains(
+            "anomaly=doubled previous_total_tokens=100000 current_total_tokens=200000"
+        )
+    )
+    #expect(
+        report.contains(
+            "privacy=excludes account, session title, session id, directory path, and log content"
+        )
+    )
+    #expect(!report.contains("/Users/"))
+    #expect(!report.contains("@example.com"))
+    #expect(!report.contains("thread_id"))
+}
+
+@Test func redactedDiagnosticReportExplainsMissingScanWithoutInventingCounts() {
+    let report = SessionNestDiagnosticReport(
+        generatedAt: Date(timeIntervalSince1970: 1_720_000_000),
+        appVersion: "0.2.28",
+        appBuild: "28",
+        operatingSystemVersion: "macOS 15.5",
+        timeZoneIdentifier: "UTC",
+        coverage: TokenCoverageBreakdown(
+            totalSessionCount: 0,
+            measuredSessionCount: 0,
+            missingLogSessionCount: 0,
+            emptyLogSessionCount: 0,
+            staleLogSessionCount: 0,
+            failedLogSessionCount: 0
+        ),
+        diagnostics: nil,
+        anomaly: nil
+    ).text
+
+    #expect(report.contains("scan.status=unavailable"))
+    #expect(report.contains("anomaly=none"))
+    #expect(!report.contains("scan.token.targets="))
+}
+
+@MainActor
+@Test func diagnosticReportCopierWritesExactTextAndReportsFailure() {
+    let copier = SessionNestDiagnosticReportCopier()
+    var copiedText: String?
+
+    #expect(
+        copier.copy(
+            "safe report",
+            writeString: { text in
+                copiedText = text
+                return true
+            })
+    )
+    #expect(copiedText == "safe report")
+    #expect(!copier.copy("safe report", writeString: { _ in false }))
+    #expect(SessionNestDiagnosticCopyFeedback.idle.title == "复制脱敏诊断")
+    #expect(SessionNestDiagnosticCopyFeedback.copied.title == "脱敏诊断已复制")
+    #expect(SessionNestDiagnosticCopyFeedback.failed.title == "复制失败，请重试")
+}
+
+@MainActor
+@Test func diagnosticReportCopierReplacesClipboardAfterPreservingReadableTypes() {
+    let pasteboard = NSPasteboard(name: .init("cn.nemoob.sessionnest.diagnostic-copy-test"))
+    pasteboard.clearContents()
+    let previousItem = NSPasteboardItem()
+    let customType = NSPasteboard.PasteboardType("cn.nemoob.sessionnest.test")
+    #expect(previousItem.setString("旧文本", forType: .string))
+    #expect(previousItem.setData(Data([0x01, 0x02]), forType: customType))
+    #expect(pasteboard.writeObjects([previousItem]))
+
+    #expect(
+        SessionNestDiagnosticReportCopier().copy(
+            "safe report",
+            pasteboard: pasteboard
+        )
+    )
+    #expect(pasteboard.string(forType: .string) == "safe report")
+    #expect(pasteboard.data(forType: customType) == nil)
 }
 
 @Test func updateNoticeAppearsOnlyForAvailableRelease() {
@@ -151,7 +277,7 @@ import Testing
 }
 
 @Test func statusPopoverUsesComfortableSharedDimensions() {
-    #expect(SessionNestStatusPopoverLayout.width == 420)
+    #expect(SessionNestStatusPopoverLayout.width == 440)
     #expect(SessionNestStatusPopoverLayout.height == 620)
     #expect(SessionNestStatusPopoverLayout.scrollContentTrailingGutter == 8)
     #expect(SessionNestStatusPopoverLayout.scrollViewTrailingExtension == 8)
@@ -166,9 +292,91 @@ import Testing
     #expect(SessionNestStatusLabelLayout.ringLineCap == .butt)
 }
 
-@Test func quotaRefreshScheduleBalancesFreshnessAndEnergy() {
-    #expect(SessionNestQuotaRefreshSchedule.interval == 10 * 60)
-    #expect(SessionNestQuotaRefreshSchedule.tolerance == 60)
+@Test func quotaRefreshScheduleAdaptsToForegroundAndPowerState() {
+    let foreground = SessionNestQuotaRefreshSchedule.interval(
+        isForeground: true,
+        isLowPowerModeEnabled: false
+    )
+    let foregroundLowPower = SessionNestQuotaRefreshSchedule.interval(
+        isForeground: true,
+        isLowPowerModeEnabled: true
+    )
+    let background = SessionNestQuotaRefreshSchedule.interval(
+        isForeground: false,
+        isLowPowerModeEnabled: false
+    )
+    let backgroundLowPower = SessionNestQuotaRefreshSchedule.interval(
+        isForeground: false,
+        isLowPowerModeEnabled: true
+    )
+
+    #expect(foreground == 10 * 60)
+    #expect(foregroundLowPower == 30 * 60)
+    #expect(background == 30 * 60)
+    #expect(backgroundLowPower == 60 * 60)
+    #expect(SessionNestQuotaRefreshSchedule.tolerance(for: foreground) == 60)
+    #expect(SessionNestQuotaRefreshSchedule.tolerance(for: backgroundLowPower) == 6 * 60)
+}
+
+@Test func quotaRefreshScheduleKeepsDeadlineAcrossEnvironmentChanges() {
+    let now = Date(timeIntervalSinceReferenceDate: 10_000)
+    let lastRefresh = now.addingTimeInterval(-5 * 60)
+
+    #expect(
+        SessionNestQuotaRefreshSchedule.nextFireDate(
+            now: now,
+            freshnessReference: lastRefresh,
+            interval: 10 * 60
+        ) == lastRefresh.addingTimeInterval(10 * 60)
+    )
+    #expect(
+        SessionNestQuotaRefreshSchedule.nextFireDate(
+            now: now,
+            freshnessReference: now.addingTimeInterval(-31 * 60),
+            interval: 30 * 60
+        ) == now
+    )
+    #expect(
+        SessionNestQuotaRefreshSchedule.nextFireDate(
+            now: now,
+            freshnessReference: nil,
+            interval: 30 * 60
+        ) == now.addingTimeInterval(30 * 60)
+    )
+    #expect(
+        SessionNestQuotaRefreshSchedule.nextFireDate(
+            now: now,
+            freshnessReference: now.addingTimeInterval(60),
+            interval: 30 * 60
+        ) == now.addingTimeInterval(30 * 60)
+    )
+}
+
+@Test func quotaRefreshScheduleTreatsOnlyVisibleForegroundInterfaceAsForeground() {
+    #expect(
+        SessionNestQuotaRefreshSchedule.isForeground(
+            isApplicationActive: true,
+            isMainWindowVisible: true,
+            isPopoverVisible: false
+        ))
+    #expect(
+        SessionNestQuotaRefreshSchedule.isForeground(
+            isApplicationActive: false,
+            isMainWindowVisible: false,
+            isPopoverVisible: true
+        ))
+    #expect(
+        !SessionNestQuotaRefreshSchedule.isForeground(
+            isApplicationActive: false,
+            isMainWindowVisible: true,
+            isPopoverVisible: false
+        ))
+    #expect(
+        !SessionNestQuotaRefreshSchedule.isForeground(
+            isApplicationActive: true,
+            isMainWindowVisible: false,
+            isPopoverVisible: false
+        ))
 }
 
 @Test func automaticQuotaRefreshPolicyExtendsMaximumAgeOnlyInLowPowerMode() {
@@ -250,7 +458,7 @@ import Testing
         weight: .medium
     )
     let textWidth = ceil(
-        ("已用 9999亿" as NSString).size(withAttributes: [.font: font]).width
+        ("本期 9999亿" as NSString).size(withAttributes: [.font: font]).width
     )
     let requiredWidth =
         SessionNestStatusLabelLayout.ringDiameter
@@ -274,6 +482,10 @@ import Testing
         + ceil(tokenFont.boundingRectForFont.height)
         + SessionNestStatusLabelLayout.verticalSpacing
 
-    #expect(SessionNestStatusLabelLayout.statusItemLength == 68)
+    #expect(SessionNestStatusLabelLayout.statusItemLength == 72)
+    #expect(
+        SessionNestStatusLabelLayout.fontSize
+            > SessionNestStatusLabelLayout.tokenFontSize
+    )
     #expect(requiredHeight <= SessionNestStatusLabelLayout.hostedHeight)
 }

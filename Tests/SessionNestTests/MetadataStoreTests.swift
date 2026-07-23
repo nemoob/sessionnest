@@ -28,6 +28,179 @@ import Testing
     #expect(tags == [tag])
 }
 
+@Test func newDatabaseRecordsSchemaVersionWithoutMigrationBackup() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+
+    let store = try MetadataStore(databaseURL: databaseURL)
+
+    #expect(try sqliteInteger("PRAGMA user_version", at: databaseURL) == 1)
+    #expect(
+        !FileManager.default.fileExists(
+            atPath: MetadataStore.schemaMigrationBackupURL(for: databaseURL).path
+        ))
+    withExtendedLifetime(store) {}
+}
+
+@Test func existingDatabaseIsBackedUpBeforeSchemaMigration() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    try executeSQLite(
+        """
+        CREATE TABLE thread_meta (
+          thread_id TEXT PRIMARY KEY,
+          is_favorite INTEGER NOT NULL DEFAULT 0,
+          collection_id TEXT
+        );
+        INSERT INTO thread_meta VALUES ('kept', 1, NULL);
+        """,
+        at: databaseURL
+    )
+
+    let store = try MetadataStore(databaseURL: databaseURL)
+    let backupURL = MetadataStore.schemaMigrationBackupURL(for: databaseURL)
+
+    #expect(try await store.loadMetadata()["kept"]?.isFavorite == true)
+    #expect(try sqliteInteger("PRAGMA user_version", at: databaseURL) == 1)
+    #expect(try sqliteInteger("PRAGMA user_version", at: backupURL) == 0)
+    #expect(
+        try sqliteInteger(
+            "SELECT is_favorite FROM thread_meta WHERE thread_id = 'kept'",
+            at: backupURL
+        ) == 1
+    )
+}
+
+@Test func failedSchemaMigrationRollsBackAndKeepsBackup() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    try executeSQLite(
+        """
+        CREATE TABLE migration_marker (value INTEGER NOT NULL);
+        INSERT INTO migration_marker VALUES (47);
+        CREATE TABLE thread_token_timed (thread_id TEXT NOT NULL);
+        """,
+        at: databaseURL
+    )
+
+    #expect(throws: MetadataStoreError.self) {
+        _ = try MetadataStore(databaseURL: databaseURL)
+    }
+
+    let backupURL = MetadataStore.schemaMigrationBackupURL(for: databaseURL)
+    #expect(try sqliteInteger("SELECT value FROM migration_marker", at: backupURL) == 47)
+    #expect(try sqliteInteger("PRAGMA user_version", at: databaseURL) == 0)
+    #expect(
+        try sqliteInteger(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table' AND name = 'collections'
+            """,
+            at: databaseURL
+        ) == 0
+    )
+}
+
+@Test func batchFavoritePersistsEveryThreadAndPreservesCollections() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+    let collection = try await store.createCollection(name: "待处理")
+    try await store.assign(threadID: "first", collectionID: collection.id)
+
+    try await store.setFavorite(threadIDs: ["first", "second"], isFavorite: true)
+    let favorites = try await store.loadMetadata()
+
+    #expect(favorites["first"]?.isFavorite == true)
+    #expect(favorites["first"]?.collectionID == collection.id)
+    #expect(favorites["second"]?.isFavorite == true)
+
+    try await store.setFavorite(threadIDs: ["first", "second"], isFavorite: false)
+    let cleared = try await store.loadMetadata()
+    #expect(cleared["first"]?.isFavorite == false)
+    #expect(cleared["second"]?.isFavorite == false)
+}
+
+@Test func savedViewsPersistCompleteFilterStateAndCanBeDeleted() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    let store = try MetadataStore(databaseURL: databaseURL)
+
+    let savedView = try await store.createSavedView(
+        name: "待处理 Swift",
+        selection: .tag("swift"),
+        query: "crash",
+        timeFilter: .sevenDays,
+        sortOrder: .title
+    )
+    let reopenedStore = try MetadataStore(databaseURL: databaseURL)
+
+    #expect(try await reopenedStore.loadSavedViews() == [savedView])
+
+    try await reopenedStore.deleteSavedView(id: savedView.id)
+    #expect(try await reopenedStore.loadSavedViews().isEmpty)
+}
+
+@Test func statisticsSnapshotsPersistOnlyForMatchingInputsAndIgnoreDamage() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    let store = try MetadataStore(databaseURL: databaseURL)
+    let snapshot = StatisticsSnapshot(
+        totalUsage: TokenUsageBreakdown(
+            inputTokens: 120,
+            cachedInputTokens: 80,
+            outputTokens: 20,
+            reasoningOutputTokens: 5,
+            totalTokens: 140
+        ),
+        totalSessionCount: 1,
+        measuredSessionCount: 1,
+        averageTokensPerMeasuredSession: 140,
+        dailyPoints: [],
+        projectRows: [],
+        sessionRows: [],
+        eligibleSessionIDs: ["thread"]
+    )
+
+    try await store.saveStatisticsSnapshot(
+        snapshot,
+        scope: SessionTimeFilter.sevenDays.statisticsPersistenceScope,
+        inputKey: "matching-input"
+    )
+
+    #expect(
+        try await store.loadStatisticsSnapshots(inputKey: "matching-input")
+            == [SessionTimeFilter.sevenDays.statisticsPersistenceScope: snapshot]
+    )
+    #expect(try await store.loadStatisticsSnapshots(inputKey: "changed-input").isEmpty)
+
+    var database: OpaquePointer?
+    #expect(sqlite3_open(databaseURL.path, &database) == SQLITE_OK)
+    guard let database else { return }
+    #expect(
+        sqlite3_exec(
+            database,
+            "UPDATE statistics_snapshots SET snapshot_json = X'00'",
+            nil,
+            nil,
+            nil
+        ) == SQLITE_OK
+    )
+    sqlite3_close(database)
+
+    #expect(try await store.loadStatisticsSnapshots(inputKey: "matching-input").isEmpty)
+}
+
 @Test func projectCachePersistsEveryResolutionKind() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -260,7 +433,8 @@ import Testing
             ],
             latestEventTimestamp: nil
         ),
-        rebuild: false
+        rebuild: false,
+        reconciledAt: 450
     )
 
     #expect(
@@ -273,7 +447,8 @@ import Testing
                 scannedOffset: 350,
                 maximum: tokenUsage(100, 60, 30, 20, 130),
                 latestEventTimestamp: nil,
-                parserVersion: 1
+                parserVersion: 1,
+                lastReconciledAt: 450
             ))
     #expect(
         try await store.loadThreadTokenDailyUsage() == [
@@ -314,7 +489,8 @@ import Testing
                 scannedOffset: 550,
                 maximum: tokenUsage(125, 70, 40, 25, 165),
                 latestEventTimestamp: 1_752_560_000,
-                parserVersion: 1
+                parserVersion: 1,
+                lastReconciledAt: 450
             ))
     #expect(
         try await store.loadThreadTokenDailyUsage() == [
@@ -342,7 +518,8 @@ import Testing
             dailyUsage: [secondDay: tokenUsage(10, 4, 3, 2, 13)],
             latestEventTimestamp: 1_752_570_000
         ),
-        rebuild: true
+        rebuild: true,
+        reconciledAt: 750
     )
 
     #expect(
@@ -355,7 +532,8 @@ import Testing
                 scannedOffset: 190,
                 maximum: tokenUsage(10, 4, 3, 2, 13),
                 latestEventTimestamp: 1_752_570_000,
-                parserVersion: 2
+                parserVersion: 2,
+                lastReconciledAt: 750
             ))
     #expect(
         try await store.loadThreadTokenDailyUsage() == [
@@ -480,6 +658,184 @@ import Testing
             "thread_id", "event_at", "input_tokens", "cached_input_tokens",
             "output_tokens", "reasoning_output_tokens", "total_tokens",
         ])
+}
+
+@Test func tokenTimedDailyUsageAggregatesWithIndexedLocalDayRangesAcrossDST() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let databaseURL = directory.appendingPathComponent("manager.sqlite")
+    let store = try MetadataStore(databaseURL: databaseURL)
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+    let springDay = try #require(
+        calendar.date(from: DateComponents(year: 2026, month: 3, day: 8))
+    )
+    let nextDay = try #require(calendar.date(byAdding: .day, value: 1, to: springDay))
+    let springDayStart = Int64(springDay.timeIntervalSince1970)
+    let nextDayStart = Int64(nextDay.timeIntervalSince1970)
+    #expect(nextDayStart - springDayStart == 23 * 60 * 60)
+    let rangeStart = springDayStart + 60
+    let rangeEnd = nextDayStart + 60
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/measured.jsonl",
+        fileSize: 500,
+        fileModificationTimeNS: 600,
+        parserVersion: 4,
+        result: tokenScanResult(
+            offset: 480,
+            maximum: tokenUsage(150, 75, 30, 15, 180),
+            dailyUsage: [:],
+            timedUsage: [
+                rangeStart - 1: tokenUsage(90, 45, 18, 9, 108),
+                rangeStart: tokenUsage(10, 5, 2, 1, 12),
+                nextDayStart - 1: tokenUsage(20, 10, 4, 2, 24),
+                rangeEnd: tokenUsage(30, 15, 6, 3, 36),
+                rangeEnd + 1: tokenUsage(70, 35, 14, 7, 84),
+            ],
+            latestEventTimestamp: rangeEnd + 1
+        ),
+        rebuild: false
+    )
+    try await store.saveThreadTokenScan(
+        threadID: "other",
+        rolloutPath: "/rollout/other.jsonl",
+        fileSize: 100,
+        fileModificationTimeNS: 200,
+        parserVersion: 4,
+        result: tokenScanResult(
+            offset: 90,
+            maximum: tokenUsage(5, 2, 1, 0, 6),
+            dailyUsage: [:],
+            timedUsage: [rangeStart + 30: tokenUsage(5, 2, 1, 0, 6)],
+            latestEventTimestamp: rangeStart + 30
+        ),
+        rebuild: false
+    )
+
+    let dailyUsage = try await store.loadThreadTokenTimedDailyUsage(
+        startingAt: rangeStart,
+        endingAt: rangeEnd,
+        calendar: calendar
+    )
+    #expect(
+        dailyUsage.sorted(by: dailyUsageSort) == [
+            ThreadTokenDailyUsage(
+                threadID: "measured",
+                dayStart: springDayStart,
+                usage: tokenUsage(30, 15, 6, 3, 36)
+            ),
+            ThreadTokenDailyUsage(
+                threadID: "measured",
+                dayStart: nextDayStart,
+                usage: tokenUsage(30, 15, 6, 3, 36)
+            ),
+            ThreadTokenDailyUsage(
+                threadID: "other",
+                dayStart: springDayStart,
+                usage: tokenUsage(5, 2, 1, 0, 6)
+            ),
+        ])
+
+    var database: OpaquePointer?
+    #expect(sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+    guard let database else { return }
+    defer { sqlite3_close(database) }
+    let queryPlan = queryPlanDetails(
+        """
+        WITH day_ranges(day_start, range_start, range_end) AS (
+          VALUES (\(springDayStart), \(rangeStart), \(rangeEnd))
+        )
+        SELECT timed.thread_id, day_ranges.day_start, SUM(timed.total_tokens)
+        FROM day_ranges
+        JOIN thread_token_timed AS timed
+          ON timed.event_at >= day_ranges.range_start
+         AND timed.event_at <= day_ranges.range_end
+        GROUP BY timed.thread_id, day_ranges.day_start
+        """,
+        in: database
+    )
+    #expect(queryPlan.contains { $0.contains("thread_token_timed_event_at") })
+}
+
+@Test func tokenRecalculationReplacesOnlySelectedLocalDays() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
+    let firstDay: Int64 = 1_767_225_600
+    let secondDay = firstDay + 24 * 60 * 60
+    let thirdDay = secondDay + 24 * 60 * 60
+    let original = tokenUsage(10, 2, 3, 1, 13)
+    let corrected = tokenUsage(100, 20, 30, 10, 130)
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(identifier: "UTC"))
+    let range = try #require(
+        TokenUsageRecalculationRange(
+            from: Date(timeIntervalSince1970: TimeInterval(secondDay)),
+            through: Date(timeIntervalSince1970: TimeInterval(secondDay)),
+            calendar: calendar
+        ))
+
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/measured.jsonl",
+        fileSize: 300,
+        fileModificationTimeNS: 400,
+        parserVersion: 2,
+        result: tokenScanResult(
+            offset: 300,
+            maximum: original,
+            dailyUsage: [
+                firstDay: original,
+                secondDay: original,
+                thirdDay: original,
+            ],
+            timedUsage: [
+                firstDay + 60: original,
+                secondDay + 60: original,
+                thirdDay + 60: original,
+            ],
+            latestEventTimestamp: thirdDay + 60
+        ),
+        rebuild: true
+    )
+    try await store.saveThreadTokenScan(
+        threadID: "measured",
+        rolloutPath: "/rollout/measured.jsonl",
+        fileSize: 300,
+        fileModificationTimeNS: 400,
+        parserVersion: 2,
+        result: tokenScanResult(
+            offset: 300,
+            maximum: corrected,
+            dailyUsage: [
+                firstDay: corrected,
+                secondDay: corrected,
+                thirdDay: corrected,
+            ],
+            timedUsage: [
+                firstDay + 60: corrected,
+                secondDay + 60: corrected,
+                thirdDay + 60: corrected,
+            ],
+            latestEventTimestamp: thirdDay + 60
+        ),
+        rebuild: true,
+        recalculationRange: range
+    )
+
+    #expect(
+        try await store.loadThreadTokenDailyUsage().map(\.usage) == [
+            original,
+            corrected,
+            original,
+        ])
+    let timedUsage = try await store.loadThreadTokenTimedUsage(
+        startingAt: firstDay,
+        endingAt: thirdDay + 60
+    )
+    #expect(timedUsage.sorted(by: timedUsageSort).map(\.usage) == [original, corrected, original])
 }
 
 @Test func tokenTimedUsagePruneKeepsBoundaryAndDailyHistoryAndIsIdempotent() async throws {
@@ -665,6 +1021,7 @@ import Testing
 
     let store = try MetadataStore(databaseURL: databaseURL)
     #expect(try await store.loadThreadTokenCache()["legacy"]?.maximum.totalTokens == 50)
+    #expect(try await store.loadThreadTokenCache()["legacy"]?.lastReconciledAt == nil)
     #expect(try await store.loadThreadTokenDailyUsage().map(\.usage.totalTokens) == [50])
     #expect(try await store.loadThreadTokenTimedUsage(startingAt: 0, endingAt: 1_000).isEmpty)
     #expect(try await store.loadTokenDiscoveryCache().isEmpty)
@@ -696,9 +1053,20 @@ import Testing
     #expect(sqlite3_column_int64(statement, 3) == 50)
     #expect(sqlite3_step(statement) == SQLITE_DONE)
     #expect(
+        tableColumns("thread_token_usage", in: database) == [
+            "thread_id", "rollout_path", "file_size", "file_mtime_ns", "scanned_offset",
+            "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens",
+            "total_tokens", "last_event_at", "parser_version", "last_reconciled_at",
+        ])
+    #expect(
         tableColumns("token_discovery_cache", in: database) == [
             "rollout_path", "file_size", "file_mtime_ns", "subagent_id",
             "parent_thread_id", "parser_version",
+        ])
+    #expect(
+        tableColumns("saved_views", in: database) == [
+            "id", "name", "selection_kind", "selection_value", "query", "time_filter",
+            "session_sort_order", "sort_order",
         ])
 }
 
@@ -819,7 +1187,8 @@ import Testing
                 scannedOffset: 100,
                 maximum: .zero,
                 latestEventTimestamp: nil,
-                parserVersion: 2
+                parserVersion: 2,
+                lastReconciledAt: nil
             )
     )
     #expect(try await store.loadThreadTokenDailyUsage().isEmpty)
@@ -928,6 +1297,13 @@ private func timedUsageSort(_ lhs: ThreadTokenTimedUsage, _ rhs: ThreadTokenTime
     return lhs.eventAt < rhs.eventAt
 }
 
+private func dailyUsageSort(_ lhs: ThreadTokenDailyUsage, _ rhs: ThreadTokenDailyUsage) -> Bool {
+    if lhs.threadID != rhs.threadID {
+        return lhs.threadID < rhs.threadID
+    }
+    return lhs.dayStart < rhs.dayStart
+}
+
 private func executeSQLite(_ sql: String, at databaseURL: URL) throws {
     var database: OpaquePointer?
     guard sqlite3_open(databaseURL.path, &database) == SQLITE_OK, let database else {
@@ -937,6 +1313,32 @@ private func executeSQLite(_ sql: String, at databaseURL: URL) throws {
     guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
         throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
     }
+}
+
+private func sqliteInteger(_ sql: String, at databaseURL: URL) throws -> Int64 {
+    var database: OpaquePointer?
+    guard
+        sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+        let database
+    else {
+        if let database {
+            sqlite3_close(database)
+        }
+        throw MetadataStoreError.sqlite("Unable to open test database")
+    }
+    defer { sqlite3_close(database) }
+
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+        let statement
+    else {
+        throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+    }
+    defer { sqlite3_finalize(statement) }
+    guard sqlite3_step(statement) == SQLITE_ROW else {
+        throw MetadataStoreError.sqlite(String(cString: sqlite3_errmsg(database)))
+    }
+    return sqlite3_column_int64(statement, 0)
 }
 
 private func tableColumns(_ table: String, in database: OpaquePointer) -> Set<String> {
@@ -954,4 +1356,21 @@ private func tableColumns(_ table: String, in database: OpaquePointer) -> Set<St
         columns.insert(String(cString: name))
     }
     return columns
+}
+
+private func queryPlanDetails(_ sql: String, in database: OpaquePointer) -> [String] {
+    var statement: OpaquePointer?
+    guard
+        sqlite3_prepare_v2(database, "EXPLAIN QUERY PLAN \(sql)", -1, &statement, nil)
+            == SQLITE_OK,
+        let statement
+    else { return [] }
+    defer { sqlite3_finalize(statement) }
+
+    var details: [String] = []
+    while sqlite3_step(statement) == SQLITE_ROW {
+        guard let detail = sqlite3_column_text(statement, 3) else { continue }
+        details.append(String(cString: detail))
+    }
+    return details
 }

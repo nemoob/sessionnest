@@ -33,6 +33,24 @@ import Testing
     )
 }
 
+@Test func automaticUpdateScheduleReturnsExactNextDueDate() {
+    let now = Date(timeIntervalSince1970: 100_000)
+    let recentAttempt = now.addingTimeInterval(-3_600)
+
+    #expect(AppUpdateSchedule.nextCheckDate(lastAttempt: nil, now: now) == now)
+    #expect(
+        AppUpdateSchedule.nextCheckDate(lastAttempt: recentAttempt, now: now)
+            == recentAttempt.addingTimeInterval(AppUpdateSchedule.interval)
+    )
+    #expect(
+        AppUpdateSchedule.nextCheckDate(
+            lastAttempt: now.addingTimeInterval(-AppUpdateSchedule.interval - 1),
+            now: now
+        ) == now
+    )
+    #expect(AppUpdateSchedule.timerTolerance == 5 * 60)
+}
+
 @Test func githubReleaseDecodesPublicReleaseFields() throws {
     let data = Data(
         #"{"tag_name":"v0.2.4","html_url":"https://github.com/nemoob/sessionnest/releases/tag/v0.2.4","name":"SessionNest v0.2.4","body":"Daily update checking"}"#
@@ -105,6 +123,63 @@ import Testing
 
     await checker.check(.manual)
     #expect(requestCount == 1)
+}
+
+@MainActor
+@Test func automaticCheckerExposesNextDueDateForPersistentScheduling() async {
+    let now = Date(timeIntervalSince1970: 100_000)
+    let defaults = makeUpdateDefaults()
+    let preferences = AppUpdatePreferences(defaults: defaults)
+    let checker = AppUpdateChecker(
+        currentVersion: AppVersion(tag: "0.2.45")!,
+        preferences: preferences,
+        now: { now },
+        fetch: { _ in githubRelease(tag: "v0.2.45") }
+    )
+
+    #expect(checker.nextAutomaticCheckAt == now)
+    await checker.check(.automatic)
+    #expect(
+        checker.nextAutomaticCheckAt
+            == now.addingTimeInterval(AppUpdateSchedule.interval)
+    )
+
+    checker.setAutomaticChecksEnabled(false)
+    #expect(checker.nextAutomaticCheckAt == nil)
+}
+
+@MainActor
+@Test func inFlightManualCheckSatisfiesDueAutomaticScheduleWithoutDuplicateRequest() async {
+    let now = Date(timeIntervalSince1970: 100_000)
+    let gate = UpdateTestGate()
+    var requestCount = 0
+    let checker = AppUpdateChecker(
+        currentVersion: AppVersion(tag: "0.2.45")!,
+        preferences: AppUpdatePreferences(defaults: makeUpdateDefaults()),
+        now: { now },
+        fetch: { _ in
+            requestCount += 1
+            await gate.wait()
+            return githubRelease(tag: "v0.2.45")
+        }
+    )
+
+    let manualCheck = Task { @MainActor in
+        await checker.check(.manual)
+    }
+    while requestCount == 0 {
+        await Task.yield()
+    }
+
+    await checker.check(.automatic)
+    #expect(requestCount == 1)
+    #expect(
+        checker.nextAutomaticCheckAt
+            == now.addingTimeInterval(AppUpdateSchedule.interval)
+    )
+
+    await gate.open()
+    await manualCheck.value
 }
 
 @Test func githubReleaseAPIUsesExpectedEndpointAndHeaders() {

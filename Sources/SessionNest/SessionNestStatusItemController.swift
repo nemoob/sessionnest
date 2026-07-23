@@ -24,16 +24,16 @@ enum StatusPopoverClickPolicy {
 }
 
 enum SessionNestStatusLabelLayout {
-    static let statusItemLength: CGFloat = 68
+    static let statusItemLength: CGFloat = 72
     static let horizontalInset: CGFloat = 3
     static let ringDiameter: CGFloat = 14
     static let ringLineWidth: CGFloat = 4
     static let ringLineCap: CGLineCap = .butt
     static let spacing: CGFloat = 4
-    static let fontSize: CGFloat = 8
+    static let fontSize: CGFloat = 9
     static let tokenFontSize: CGFloat = 7
     static let verticalSpacing: CGFloat = -1
-    static let hostedHeight: CGFloat = 18
+    static let hostedHeight: CGFloat = 20
     static let selectedBackgroundWhiteLevel = 0.23
     static let selectedBackgroundCornerRadius: CGFloat = 6
 
@@ -43,23 +43,64 @@ enum SessionNestStatusLabelLayout {
 }
 
 enum SessionNestStatusPopoverLayout {
-    static let width: CGFloat = 420
+    static let width: CGFloat = 440
     static let height: CGFloat = 620
     static let scrollContentTrailingGutter: CGFloat = 8
     static let scrollViewTrailingExtension: CGFloat = 8
 }
 
 enum SessionNestQuotaRefreshSchedule {
-    static let interval: TimeInterval = 10 * 60
-    static let tolerance: TimeInterval = 60
+    static let foregroundInterval: TimeInterval = 10 * 60
+    static let lowPowerForegroundInterval: TimeInterval = 30 * 60
+    static let backgroundInterval: TimeInterval = 30 * 60
+    static let lowPowerBackgroundInterval: TimeInterval = 60 * 60
+
+    static func isForeground(
+        isApplicationActive: Bool,
+        isMainWindowVisible: Bool,
+        isPopoverVisible: Bool
+    ) -> Bool {
+        isPopoverVisible || (isApplicationActive && isMainWindowVisible)
+    }
+
+    static func interval(
+        isForeground: Bool,
+        isLowPowerModeEnabled: Bool
+    ) -> TimeInterval {
+        switch (isForeground, isLowPowerModeEnabled) {
+        case (true, false):
+            foregroundInterval
+        case (true, true):
+            lowPowerForegroundInterval
+        case (false, false):
+            backgroundInterval
+        case (false, true):
+            lowPowerBackgroundInterval
+        }
+    }
+
+    static func tolerance(for interval: TimeInterval) -> TimeInterval {
+        interval / 10
+    }
+
+    static func nextFireDate(
+        now: Date,
+        freshnessReference: Date?,
+        interval: TimeInterval
+    ) -> Date {
+        guard let freshnessReference, freshnessReference <= now else {
+            return now.addingTimeInterval(interval)
+        }
+        return max(now, freshnessReference.addingTimeInterval(interval))
+    }
 }
 
 enum SessionNestAutomaticQuotaRefreshPolicy {
     // 低电量模式减少后台额度请求，把有效期从十分钟放宽到三十分钟。
-    static let lowPowerMaximumAge: TimeInterval = 30 * 60
+    static let lowPowerMaximumAge = SessionNestQuotaRefreshSchedule.lowPowerForegroundInterval
 
     static func maximumAge(
-        requestedMaximumAge: TimeInterval = SessionNestQuotaRefreshSchedule.interval,
+        requestedMaximumAge: TimeInterval = SessionNestQuotaRefreshSchedule.foregroundInterval,
         isLowPowerModeEnabled: Bool
     ) -> TimeInterval {
         // 正常模式完全沿用调用方阈值，便于测试和特定自动入口明确控制。
@@ -111,6 +152,10 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
     private var quotaRefreshTimer: Timer?
+    private var refreshEnvironmentObservation: AnyCancellable?
+    private var updateCheckTimer: Timer?
+    private var updateCheckPreferenceObservation: AnyCancellable?
+    private var isMainWindowVisible = false
 
     init(model: SessionListModel?, updateChecker: AppUpdateChecker) {
         self.model = model
@@ -137,36 +182,152 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
         menu.delegate = self
         menu.autoenablesItems = false
         updateAccessibilityLabel()
-        startQuotaRefreshTimer()
+        startQuotaRefreshScheduling()
+        startUpdateCheckScheduling()
     }
 
     func setOpenMainWindowAction(_ action: @escaping () -> Void) {
         openMainWindowAction = action
     }
 
-    private func startQuotaRefreshTimer() {
-        guard model != nil, quotaRefreshTimer == nil else { return }
+    func setMainWindowVisible(_ isVisible: Bool) {
+        guard isMainWindowVisible != isVisible else { return }
+        isMainWindowVisible = isVisible
+        refreshEnvironmentDidChange()
+    }
+
+    private func startQuotaRefreshScheduling() {
+        guard model != nil, refreshEnvironmentObservation == nil else { return }
+        refreshEnvironmentObservation = Publishers.MergeMany([
+            NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification
+            ),
+            NotificationCenter.default.publisher(
+                for: NSApplication.didResignActiveNotification
+            ),
+            NotificationCenter.default.publisher(
+                for: Notification.Name.NSProcessInfoPowerStateDidChange
+            ),
+            NSWorkspace.shared.notificationCenter.publisher(
+                for: NSWorkspace.didWakeNotification
+            ),
+        ])
+        .sink { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.refreshEnvironmentDidChange()
+            }
+        }
+        rescheduleQuotaRefreshTimer()
+    }
+
+    private func refreshEnvironmentDidChange() {
+        quotaRefreshTimer?.invalidate()
+        quotaRefreshTimer = nil
+        guard isForeground, let model else {
+            rescheduleQuotaRefreshTimer()
+            return
+        }
+        Task {
+            // 与界面入口保持同一顺序，完整加载已读取额度时不再并发重复请求。
+            await model.reloadIfStale()
+            // 回到前台、退出低电量或系统唤醒后，仅补齐已经过期的额度。
+            await model.refreshRateLimitsIfStale()
+            rescheduleQuotaRefreshTimer()
+        }
+    }
+
+    private func rescheduleQuotaRefreshTimer() {
+        quotaRefreshTimer?.invalidate()
+        quotaRefreshTimer = nil
+        guard model != nil else { return }
+
+        let interval = SessionNestQuotaRefreshSchedule.interval(
+            isForeground: isForeground,
+            isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled
+        )
+        let freshnessReference = [
+            model?.lastSuccessfulUsageRefreshAt,
+            model?.lastUsageRefreshAttemptAt,
+        ]
+        .compactMap { $0 }
+        .max()
+        let now = Date()
         let timer = Timer(
-            timeInterval: SessionNestQuotaRefreshSchedule.interval,
-            repeats: true
+            fire: SessionNestQuotaRefreshSchedule.nextFireDate(
+                now: now,
+                freshnessReference: freshnessReference,
+                interval: interval
+            ),
+            interval: 0,
+            repeats: false
         ) { [weak self] _ in
             // 定时器只负责唤醒，额度状态仍统一在主线程模型中更新。
             Task { @MainActor [weak self] in
                 // 控制器或模型已经释放时不再启动后台工作。
-                guard let model = self?.model else { return }
+                guard let self, let model = self.model else { return }
                 // 加载期间完整刷新已经包含额度读取，避免并发发起重复请求。
                 guard
                     SessionNestAutomaticQuotaRefreshPolicy.shouldRefresh(
                         isLoading: model.isLoading
                     )
-                else { return }
+                else {
+                    self.rescheduleQuotaRefreshTimer()
+                    return
+                }
                 // 模型统一读取电源状态和失败退避，避免不同自动入口采用不同阈值。
                 await model.refreshRateLimitsIfStale()
+                // 单次 Timer 按最新成功或尝试时间排下次，手动刷新不会推迟实际期限。
+                self.rescheduleQuotaRefreshTimer()
             }
         }
-        timer.tolerance = SessionNestQuotaRefreshSchedule.tolerance
+        timer.tolerance = SessionNestQuotaRefreshSchedule.tolerance(for: interval)
         RunLoop.main.add(timer, forMode: .common)
         quotaRefreshTimer = timer
+    }
+
+    private var isForeground: Bool {
+        SessionNestQuotaRefreshSchedule.isForeground(
+            isApplicationActive: NSApp.isActive,
+            isMainWindowVisible: isMainWindowVisible,
+            isPopoverVisible: refreshState.isPopoverShown
+        )
+    }
+
+    private func startUpdateCheckScheduling() {
+        guard updateCheckPreferenceObservation == nil else { return }
+        updateCheckPreferenceObservation = updateChecker.$automaticallyChecksForUpdates
+            .dropFirst()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.performAutomaticUpdateCheckAndReschedule()
+                }
+            }
+        performAutomaticUpdateCheckAndReschedule()
+    }
+
+    private func performAutomaticUpdateCheckAndReschedule() {
+        updateCheckTimer?.invalidate()
+        updateCheckTimer = nil
+        Task { [weak self] in
+            guard let self else { return }
+            await updateChecker.check(.automatic)
+            scheduleAutomaticUpdateCheck()
+        }
+    }
+
+    private func scheduleAutomaticUpdateCheck() {
+        updateCheckTimer?.invalidate()
+        updateCheckTimer = nil
+        guard let fireDate = updateChecker.nextAutomaticCheckAt else { return }
+
+        let timer = Timer(fire: fireDate, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.performAutomaticUpdateCheckAndReschedule()
+            }
+        }
+        timer.tolerance = AppUpdateSchedule.timerTolerance
+        RunLoop.main.add(timer, forMode: .common)
+        updateCheckTimer = timer
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -225,9 +386,7 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
         }
 
         let status = status(for: model)
-        button.setAccessibilityLabel(
-            "\(status.quotaDetailText)，\(status.compactTokenText)，\(status.sessionTotalText)"
-        )
+        button.setAccessibilityLabel(status.coreDetailTexts.joined(separator: "，"))
     }
 
     private func rebuildMenu(_ menu: NSMenu) {
@@ -247,8 +406,9 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
         }
 
         let status = status(for: model)
-        addInfoItem(status.sessionTotalText, to: menu)
-        addInfoItem(status.quotaDetailText, to: menu)
+        for detailText in status.coreDetailTexts {
+            addInfoItem(detailText, to: menu)
+        }
         if status.showsProgress {
             addInfoItem("正在更新…", systemImage: "arrow.triangle.2.circlepath", to: menu)
         }
@@ -364,8 +524,6 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
                 await model.reloadIfStale()
                 // 模型统一判断快照或最近尝试是否过期，完整 reload 失败也不会立即重试。
                 await model.refreshRateLimitsIfStale()
-                // 会话与额度状态稳定后再执行每日更新检查，避免影响首屏数据刷新。
-                await updateChecker.check(.automatic)
             }
         }
     }
@@ -430,12 +588,14 @@ final class SessionNestStatusItemController: NSObject, NSMenuDelegate, NSPopover
     func popoverWillShow(_ notification: Notification) {
         refreshState.prepareForPopoverPresentation()
         statusItem?.button?.highlight(true)
+        refreshEnvironmentDidChange()
     }
 
     func popoverDidClose(_ notification: Notification) {
         stopOutsideClickMonitoring()
         refreshState.isPopoverShown = false
         statusItem?.button?.highlight(false)
+        refreshEnvironmentDidChange()
     }
 }
 

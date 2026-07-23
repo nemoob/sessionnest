@@ -17,6 +17,13 @@ struct TokenUsageBreakdown: Codable, Equatable, Sendable {
 
     var isZero: Bool { self == .zero }
 
+    var nonCachedTokens: Int64 {
+        // 缓存输入是总 Token 的子集，先收敛到有效范围再相减，避免重复计数或负值。
+        let total = max(0, totalTokens)
+        let cached = min(total, max(0, cachedInputTokens))
+        return total - cached
+    }
+
     func componentwiseMaximum(_ other: Self) -> Self {
         Self(
             inputTokens: max(inputTokens, other.inputTokens),
@@ -60,6 +67,12 @@ struct TokenUsageBreakdown: Codable, Equatable, Sendable {
     }
 }
 
+enum TokenUsageDefinition {
+    static let explanation =
+        "总 Token 取本地日志 total_tokens（已包含缓存输入）；非缓存 Token 为总 Token 减缓存输入，最低为 0。"
+        + "额度消耗只采用 Codex 服务端百分比，本地 Token 不参与换算。"
+}
+
 struct TokenScanState: Equatable, Sendable {
     var maximum: TokenUsageBreakdown
     var dailyUsage: [Int64: TokenUsageBreakdown]
@@ -78,6 +91,17 @@ struct TokenScanState: Equatable, Sendable {
 struct TokenScanResult: Equatable, Sendable {
     let offset: Int64
     let state: TokenScanState
+    let duplicateTokenCheckpointCount: Int
+
+    init(
+        offset: Int64,
+        state: TokenScanState,
+        duplicateTokenCheckpointCount: Int = 0
+    ) {
+        self.offset = offset
+        self.state = state
+        self.duplicateTokenCheckpointCount = duplicateTokenCheckpointCount
+    }
 
     var maximum: TokenUsageBreakdown { state.maximum }
     var dailyUsage: [Int64: TokenUsageBreakdown] { state.dailyUsage }
@@ -90,6 +114,25 @@ struct TokenScanTarget: Equatable, Sendable {
     let id: String
     let attributionThreadID: String
     let url: URL
+}
+
+struct TokenUsageRecalculationRange: Equatable, Sendable {
+    let startDay: Int64
+    let endDayExclusive: Int64
+
+    init?(from startDate: Date, through endDate: Date, calendar: Calendar) {
+        let start = calendar.startOfDay(for: startDate)
+        let end = calendar.startOfDay(for: endDate)
+        guard start <= end,
+            let endDayExclusive = calendar.date(byAdding: .day, value: 1, to: end)
+        else { return nil }
+        startDay = Int64(start.timeIntervalSince1970)
+        self.endDayExclusive = Int64(endDayExclusive.timeIntervalSince1970)
+    }
+
+    func contains(_ timestamp: Int64) -> Bool {
+        timestamp >= startDay && timestamp < endDayExclusive
+    }
 }
 
 struct TokenDiscoveryCacheEntry: Equatable, Sendable {
@@ -131,6 +174,8 @@ struct TokenDiscoveryResult: Equatable, Sendable {
     let metrics: TokenDiscoveryMetrics
     // 不确定目标沿用旧父子关系参与扫描，但本轮必须排除出可信覆盖。
     let uncertainTargetIDs: Set<String>
+    // 无法关联到已知子代理的读取失败可能隐藏任意归属，必须撤下整轮覆盖。
+    let hasUnattributedReadFailure: Bool
     // 缓存存储访问失败时继续发布目标，同时让诊断解释为何无法命中。
     let cacheStoreFailed: Bool
 
@@ -140,6 +185,7 @@ struct TokenDiscoveryResult: Equatable, Sendable {
         removedCachePaths: Set<String>,
         metrics: TokenDiscoveryMetrics,
         uncertainTargetIDs: Set<String> = [],
+        hasUnattributedReadFailure: Bool = false,
         cacheStoreFailed: Bool = false
     ) {
         // 保存本轮完整目标集合。
@@ -152,8 +198,16 @@ struct TokenDiscoveryResult: Equatable, Sendable {
         self.metrics = metrics
         // 保存因发现读取失败而不能信任归属的目标。
         self.uncertainTargetIDs = uncertainTargetIDs
+        // 保存无法缩小到具体目标的发现失败，供覆盖层采取保守策略。
+        self.hasUnattributedReadFailure = hasUnattributedReadFailure
         // 保存缓存存储是否发生读写失败。
         self.cacheStoreFailed = cacheStoreFailed
+    }
+
+    var unreliableTargetIDs: Set<String> {
+        // 未知日志可能属于任意父会话，无法安全地只撤下部分覆盖。
+        guard hasUnattributedReadFailure else { return uncertainTargetIDs }
+        return Set(targets.map(\.id))
     }
 
     func markingCacheStoreFailed() -> Self {
@@ -164,6 +218,7 @@ struct TokenDiscoveryResult: Equatable, Sendable {
             removedCachePaths: removedCachePaths,
             metrics: metrics,
             uncertainTargetIDs: uncertainTargetIDs,
+            hasUnattributedReadFailure: hasUnattributedReadFailure,
             cacheStoreFailed: true
         )
     }
@@ -266,6 +321,8 @@ enum LocalTokenScanTargetDiscovery {
         var failedReadCount = 0
         // 变化文件读取失败时沿用旧关系扫描，但必须把对应目标标记为不确定。
         var uncertainTargetIDs: Set<String> = []
+        // 没有正向缓存的失败无法定位归属，需要撤下整轮可信覆盖。
+        var hasUnattributedReadFailure = false
 
         // 当前实现与旧逻辑一致：一旦存在根内会话，就检查传入的全部日志根目录。
         for root in roots where hasThreadInRoots {
@@ -313,6 +370,9 @@ enum LocalTokenScanTargetDiscovery {
                     if let id = restoreCachedSubagent(cached, url: url, into: &subagents) {
                         // 旧父子关系仅作保守占位，不能作为本轮可信统计覆盖。
                         uncertainTargetIDs.insert(id)
+                    } else {
+                        // 负缓存或无缓存不能证明该变化文件仍不是子代理。
+                        hasUnattributedReadFailure = true
                     }
                     continue
                 }
@@ -327,6 +387,9 @@ enum LocalTokenScanTargetDiscovery {
                     if let id = restoreCachedSubagent(cached, url: url, into: &subagents) {
                         // 属性不完整时同样排除复用关系，等待下轮重新确认。
                         uncertainTargetIDs.insert(id)
+                    } else {
+                        // 无法从旧索引确定归属时不能把其他会话误报为完整。
+                        hasUnattributedReadFailure = true
                     }
                     continue
                 }
@@ -375,6 +438,9 @@ enum LocalTokenScanTargetDiscovery {
                     if let id = restoreCachedSubagent(cached, url: url, into: &subagents) {
                         // 前缀读取失败时正文即使成功，也不能证明旧父子关系仍然有效。
                         uncertainTargetIDs.insert(id)
+                    } else {
+                        // 读取失败可能隐藏新的子代理关系，只能保守撤下全局覆盖。
+                        hasUnattributedReadFailure = true
                     }
                 }
             }
@@ -442,19 +508,22 @@ enum LocalTokenScanTargetDiscovery {
             changedCacheEntries: changedCacheEntries,
             removedCachePaths: removedCachePaths,
             metrics: metrics,
-            uncertainTargetIDs: uncertainTargetIDs
+            uncertainTargetIDs: uncertainTargetIDs,
+            hasUnattributedReadFailure: hasUnattributedReadFailure
         )
     }
 
     private static func defaultRoots() -> [URL] {
-        let environment = ProcessInfo.processInfo.environment
-        let codexHome =
-            environment["CODEX_HOME"].map(URL.init(fileURLWithPath:))
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        let codexHome = defaultCodexHome()
         return [
             codexHome.appendingPathComponent("sessions", isDirectory: true),
             codexHome.appendingPathComponent("archived_sessions", isDirectory: true),
         ]
+    }
+
+    static func defaultCodexHome() -> URL {
+        ProcessInfo.processInfo.environment["CODEX_HOME"].map(URL.init(fileURLWithPath:))
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
     }
 
     private static func readSubagentMetadata(at url: URL) -> MetadataReadResult {
@@ -581,27 +650,60 @@ enum RolloutTokenScanner {
 
         var state = baseline
         var phase: ScanPhase = baseline.observedCheckpoint ? .active : .unknown
+        var duplicateTokenCheckpointCount = 0
         var buffer = Data()
+        var searchedByteCount = 0
         var offset = fromOffset
 
         while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
             if isCancelled() { throw CancellationError() }
+            // 追加新块后只从上轮尚未搜索的位置继续，避免超长单行被反复从头扫描。
             buffer.append(chunk)
-            while let newline = buffer.firstIndex(of: 0x0A) {
-                let line = Data(buffer[..<newline])
-                offset += Int64(buffer.distance(from: buffer.startIndex, to: newline) + 1)
-                buffer.removeSubrange(buffer.startIndex...newline)
-                scan(line: line, state: &state, phase: &phase, calendar: calendar)
+            // 本轮完整行统一记录消费终点，最后只移动一次缓冲区前缀。
+            var consumedEnd = buffer.startIndex
+            // 已有尾行在上轮已确认没有换行，因此直接从新追加内容开始查找。
+            var searchStart = buffer.index(
+                buffer.startIndex,
+                offsetBy: min(searchedByteCount, buffer.count)
+            )
+            while let newline = buffer[searchStart...].firstIndex(of: 0x0A) {
+                // 超大块可能含有很多行，逐行响应取消，避免退出时仍长时间解析。
+                if isCancelled() { throw CancellationError() }
+                // 当前完整行从上一个消费终点开始，到换行符之前结束。
+                let line = Data(buffer[consumedEnd..<newline])
+                scan(
+                    line: line,
+                    state: &state,
+                    phase: &phase,
+                    duplicateTokenCheckpointCount: &duplicateTokenCheckpointCount,
+                    calendar: calendar
+                )
+                // 下一行从换行符后开始，后续搜索不再回看已处理字节。
+                consumedEnd = buffer.index(after: newline)
+                searchStart = consumedEnd
             }
+            if consumedEnd != buffer.startIndex {
+                // 只提交以换行结尾的完整记录，保留末尾半行供下一次增量扫描。
+                offset += Int64(buffer.distance(from: buffer.startIndex, to: consumedEnd))
+                // 每个读取块最多移动一次前缀，避免逐行删除引发重复内存搬移。
+                buffer.removeSubrange(buffer.startIndex..<consumedEnd)
+            }
+            // 剩余字节已全部确认无换行，下轮只需要检查新追加的字节。
+            searchedByteCount = buffer.count
         }
 
-        return TokenScanResult(offset: offset, state: state)
+        return TokenScanResult(
+            offset: offset,
+            state: state,
+            duplicateTokenCheckpointCount: duplicateTokenCheckpointCount
+        )
     }
 
     private static func scan(
         line: Data,
         state: inout TokenScanState,
         phase: inout ScanPhase,
+        duplicateTokenCheckpointCount: inout Int,
         calendar: Calendar
     ) {
         updatePhase(line: line, phase: &phase)
@@ -613,8 +715,19 @@ enum RolloutTokenScanner {
             let timestamp = try? Date(event.timestamp, strategy: .iso8601)
         else { return }
 
-        let delta = usage.positiveDelta(from: state.maximum)
         let timestampSeconds = Int64(timestamp.timeIntervalSince1970.rounded(.down))
+        if phase.recordsUsage,
+            state.observedCheckpoint,
+            usage == state.maximum
+        {
+            // 完全相同的累计检查点没有新用量，显式去重并留下诊断计数。
+            duplicateTokenCheckpointCount += 1
+            state.latestEventTimestamp = max(
+                state.latestEventTimestamp ?? timestampSeconds, timestampSeconds)
+            return
+        }
+
+        let delta = usage.positiveDelta(from: state.maximum)
         if phase.recordsUsage, !delta.isZero {
             let day = Int64(calendar.startOfDay(for: timestamp).timeIntervalSince1970)
             state.dailyUsage[day] = (state.dailyUsage[day] ?? .zero) + delta
@@ -740,5 +853,18 @@ enum TokenCacheDecision: Equatable, Sendable {
             return modificationTime == cachedModificationTime ? .reuse : .rebuild
         }
         return .append
+    }
+}
+
+enum TokenReconciliationPolicy {
+    // 每天最多重新核对一次同一日志，在持续纠错和后台磁盘读取之间保持平衡。
+    static let minimumInterval: Int64 = 24 * 60 * 60
+
+    static func isDue(lastReconciledAt: Int64?, now: Int64) -> Bool {
+        guard let lastReconciledAt else { return true }
+        let (nextReconciliationAt, overflow) = lastReconciledAt.addingReportingOverflow(
+            minimumInterval
+        )
+        return !overflow && now >= nextReconciliationAt
     }
 }
