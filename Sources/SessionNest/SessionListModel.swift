@@ -228,32 +228,90 @@ enum ThreadTokenCoverage {
         parserVersion: Int64,
         fileManager: FileManager = .default
     ) -> Set<String> {
-        Set(
-            targets.compactMap { target in
-                guard let cached = cache[target.id] else { return nil }
-                let url = target.url
-                guard url.pathExtension.lowercased() == "jsonl",
-                    fileManager.isReadableFile(atPath: url.path),
-                    let attributes = try? fileManager.attributesOfItem(atPath: url.path),
-                    attributes[.type] as? FileAttributeType == .typeRegular,
-                    let size = (attributes[.size] as? NSNumber)?.int64Value,
-                    let modificationDate = attributes[.modificationDate] as? Date
-                else { return nil }
-                let modificationTimeNS = Int64(
-                    (modificationDate.timeIntervalSince1970 * 1_000_000_000).rounded()
-                )
-                let decision = TokenCacheDecision.decide(
-                    rolloutPath: url.path,
-                    fileSize: size,
-                    modificationTime: modificationTimeNS,
-                    parserVersion: parserVersion,
-                    cachedRolloutPath: cached.rolloutPath,
-                    cachedFileSize: cached.fileSize,
-                    cachedModificationTime: cached.fileModificationTimeNS,
-                    cachedParserVersion: cached.parserVersion
-                )
-                return decision == .rebuild ? nil : target.id
-            })
+        let health = health(
+            targets: targets,
+            cache: cache,
+            parserVersion: parserVersion,
+            fileManager: fileManager
+        )
+        return measuredTargetIDs(targets: targets, cache: cache, health: health)
+    }
+
+    static func measuredTargetIDs(
+        targets: [TokenScanTarget],
+        cache: [String: ThreadTokenCache],
+        health: TokenScanHealth
+    ) -> Set<String> {
+        let targetsByThreadID = Dictionary(grouping: targets, by: \.attributionThreadID)
+        return Set(
+            targetsByThreadID.values.flatMap { attributedTargets -> [String] in
+                guard
+                    attributedTargets.allSatisfy({
+                        health.freshTargetIDs.contains($0.id)
+                    })
+                else { return [] }
+
+                return attributedTargets.compactMap { target in
+                    guard let cached = cache[target.id],
+                        cached.latestEventTimestamp != nil || !cached.maximum.isZero
+                    else { return nil }
+                    return target.id
+                }
+            }
+        )
+    }
+
+    static func health(
+        targets: [TokenScanTarget],
+        cache: [String: ThreadTokenCache],
+        parserVersion: Int64,
+        fileManager: FileManager = .default
+    ) -> TokenScanHealth {
+        var freshTargetIDs: Set<String> = []
+        var staleTargetIDs: Set<String> = []
+        var failedTargetIDs: Set<String> = []
+
+        for target in targets {
+            let url = target.url
+            guard url.pathExtension.lowercased() == "jsonl",
+                fileManager.isReadableFile(atPath: url.path),
+                let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                attributes[.type] as? FileAttributeType == .typeRegular,
+                let size = (attributes[.size] as? NSNumber)?.int64Value,
+                let modificationDate = attributes[.modificationDate] as? Date
+            else {
+                failedTargetIDs.insert(target.id)
+                continue
+            }
+            guard let cached = cache[target.id] else {
+                staleTargetIDs.insert(target.id)
+                continue
+            }
+            let modificationTimeNS = Int64(
+                (modificationDate.timeIntervalSince1970 * 1_000_000_000).rounded()
+            )
+            let decision = TokenCacheDecision.decide(
+                rolloutPath: url.path,
+                fileSize: size,
+                modificationTime: modificationTimeNS,
+                parserVersion: parserVersion,
+                cachedRolloutPath: cached.rolloutPath,
+                cachedFileSize: cached.fileSize,
+                cachedModificationTime: cached.fileModificationTimeNS,
+                cachedParserVersion: cached.parserVersion
+            )
+            if decision == .reuse, cached.scannedOffset == size {
+                freshTargetIDs.insert(target.id)
+            } else {
+                staleTargetIDs.insert(target.id)
+            }
+        }
+
+        return TokenScanHealth(
+            freshTargetIDs: freshTargetIDs,
+            staleTargetIDs: staleTargetIDs,
+            failedTargetIDs: failedTargetIDs
+        )
     }
 }
 
@@ -417,6 +475,7 @@ final class SessionListModel: ObservableObject {
     @Published var threadTokenDailyUsage: [ThreadTokenDailyUsage] = []
     @Published private(set) var tokenCoveredThreadIDs: Set<String> = []
     @Published private(set) var tokenAttributionThreadIDs: [String: String] = [:]
+    @Published private(set) var tokenScanHealth = TokenScanHealth.empty
     @Published private(set) var rateLimitSnapshot: CodexRateLimitSnapshot?
     @Published private(set) var resetCreditsSnapshot: CodexRateLimitResetCreditsSummary?
     @Published private(set) var accountSnapshot: CodexAccountSnapshot?
@@ -619,14 +678,16 @@ final class SessionListModel: ObservableObject {
             self.projectIdentityIndex = projectIdentityIndex
             threadTokenCache = result.6
             threadTokenDailyUsage = result.7
-            tokenCoveredThreadIDs = ThreadTokenCoverage.validThreadIDs(
-                threads: result.0.0 + result.0.1,
-                cache: result.6,
-                parserVersion: Self.tokenParserVersion
-            )
-            tokenAttributionThreadIDs = Dictionary(
-                uniqueKeysWithValues: allThreads.map { ($0.id, $0.id) }
-            )
+            // 完整发现父会话和子代理日志前，先撤下仅由父日志推导的覆盖结果。
+            tokenCoveredThreadIDs = []
+            // 归属关系必须等待完整目标集，避免子代理缓存暂时按独立会话解释。
+            tokenAttributionThreadIDs = [:]
+            // 新一轮发现尚未形成健康快照，清空旧状态避免误报“已追平”。
+            tokenScanHealth = .empty
+            // 线程数据已经发布但日志目标仍在发现，立即进入扫描态阻止部分统计闪现。
+            isScanningTokenUsage = true
+            // 本额度周期快照是基于旧覆盖生成的，发现完成前不继续展示。
+            quotaCycleStatisticsSnapshot = nil
             self.accountSnapshot = accountSnapshot
             let reloadCompletedAt = Date()
             lastSuccessfulReloadAt = reloadCompletedAt
@@ -975,7 +1036,18 @@ final class SessionListModel: ObservableObject {
     }
 
     func startTokenUsageScan(for threads: [CodexThread]) async {
+        // 每次请求先取得新的替换序号，保证旧扫描不能重新发布结果。
         tokenScanReplacementRequest += 1
+        // 目标发现可能需要遍历目录，等待期间先明确标记扫描状态。
+        isScanningTokenUsage = true
+        // 完整目标集未知时不采用仅父日志或上一轮的覆盖结果。
+        tokenCoveredThreadIDs = []
+        // 归属映射必须和本轮目标同时发布，避免旧子代理映射污染统计。
+        tokenAttributionThreadIDs = [:]
+        // 清空旧健康结果，让界面准确显示正在发现日志。
+        tokenScanHealth = .empty
+        // 旧额度周期快照依赖旧覆盖，扫描完成前暂时撤下。
+        quotaCycleStatisticsSnapshot = nil
         let replacementRequest = tokenScanReplacementRequest
         let previousTask = tokenScanTask
         previousTask?.cancel()
@@ -994,14 +1066,20 @@ final class SessionListModel: ObservableObject {
         tokenAttributionThreadIDs = Dictionary(
             uniqueKeysWithValues: targets.map { ($0.id, $0.attributionThreadID) }
         )
-        tokenCoveredThreadIDs = ThreadTokenCoverage.validTargetIDs(
+        tokenScanHealth = ThreadTokenCoverage.health(
             targets: targets,
             cache: cached,
             parserVersion: parserVersion
         )
+        tokenCoveredThreadIDs = ThreadTokenCoverage.measuredTargetIDs(
+            targets: targets,
+            cache: cached,
+            health: tokenScanHealth
+        )
 
         isScanningTokenUsage = true
         tokenScanTask = Task.detached(priority: .utility) { [weak self, store] in
+            var failedTargetIDs: Set<String> = []
             for target in targets {
                 guard !Task.isCancelled,
                     await self?.acceptsTokenScan(
@@ -1012,7 +1090,10 @@ final class SessionListModel: ObservableObject {
                 let url = target.url
                 guard url.pathExtension.lowercased() == "jsonl",
                     FileManager.default.isReadableFile(atPath: url.path)
-                else { continue }
+                else {
+                    failedTargetIDs.insert(target.id)
+                    continue
+                }
 
                 do {
                     let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -1020,6 +1101,7 @@ final class SessionListModel: ObservableObject {
                         let size = (attributes[.size] as? NSNumber)?.int64Value,
                         let modificationDate = attributes[.modificationDate] as? Date
                     else {
+                        failedTargetIDs.insert(target.id)
                         continue
                     }
                     let modificationTimeNS = Int64(
@@ -1044,6 +1126,25 @@ final class SessionListModel: ObservableObject {
                         previous.scannedOffset < size
                     {
                         decision = .append
+                    } else if decision == .reuse,
+                        let previous,
+                        previous.scannedOffset > size
+                    {
+                        decision = .rebuild
+                    }
+                    // 子代理增量可能仍处于父会话 fork replay，保守全量重扫才能恢复阶段边界。
+                    if decision == .append,
+                        target.id != target.attributionThreadID
+                    {
+                        decision = .rebuild
+                    }
+                    // 没有任何检查点的普通日志增长后也从头扫描，避免从元数据之后错误恢复阶段。
+                    if decision == .append,
+                        let previous,
+                        previous.latestEventTimestamp == nil,
+                        previous.maximum.isZero
+                    {
+                        decision = .rebuild
                     }
                     guard decision != .reuse else { continue }
 
@@ -1084,6 +1185,7 @@ final class SessionListModel: ObservableObject {
                     )
                 } catch {
                     if Task.isCancelled { return }
+                    failedTargetIDs.insert(target.id)
                 }
             }
 
@@ -1102,13 +1204,15 @@ final class SessionListModel: ObservableObject {
                     cache: result.0,
                     dailyUsage: result.1,
                     targets: targets,
+                    failedTargetIDs: failedTargetIDs,
                     generation: generation,
                     replacementRequest: replacementRequest
                 )
             } catch {
                 await self?.finishTokenScan(
                     generation,
-                    replacementRequest: replacementRequest
+                    replacementRequest: replacementRequest,
+                    failedTargetIDs: Set(targets.map(\.id))
                 )
             }
         }
@@ -1123,6 +1227,7 @@ final class SessionListModel: ObservableObject {
         cache: [String: ThreadTokenCache],
         dailyUsage: [ThreadTokenDailyUsage],
         targets: [TokenScanTarget],
+        failedTargetIDs: Set<String>,
         generation: Int,
         replacementRequest: Int
     ) async {
@@ -1132,10 +1237,15 @@ final class SessionListModel: ObservableObject {
         tokenAttributionThreadIDs = Dictionary(
             uniqueKeysWithValues: targets.map { ($0.id, $0.attributionThreadID) }
         )
-        tokenCoveredThreadIDs = ThreadTokenCoverage.validTargetIDs(
+        tokenScanHealth = ThreadTokenCoverage.health(
             targets: targets,
             cache: cache,
             parserVersion: Self.tokenParserVersion
+        ).markingFailed(failedTargetIDs)
+        tokenCoveredThreadIDs = ThreadTokenCoverage.measuredTargetIDs(
+            targets: targets,
+            cache: cache,
+            health: tokenScanHealth
         )
         await refreshQuotaCycleStatistics()
         isScanningTokenUsage = false
@@ -1186,8 +1296,15 @@ final class SessionListModel: ObservableObject {
         }
     }
 
-    private func finishTokenScan(_ generation: Int, replacementRequest: Int) {
+    private func finishTokenScan(
+        _ generation: Int,
+        replacementRequest: Int,
+        failedTargetIDs: Set<String> = []
+    ) async {
         guard acceptsTokenScan(generation, replacementRequest: replacementRequest) else { return }
+        tokenScanHealth = tokenScanHealth.markingFailed(failedTargetIDs)
+        tokenCoveredThreadIDs = tokenScanHealth.freshTargetIDs
+        await refreshQuotaCycleStatistics()
         isScanningTokenUsage = false
         tokenScanTask = nil
     }

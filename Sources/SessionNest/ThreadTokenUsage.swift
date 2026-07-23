@@ -92,6 +92,34 @@ struct TokenScanTarget: Equatable, Sendable {
     let url: URL
 }
 
+struct TokenScanHealth: Equatable, Sendable {
+    let freshTargetIDs: Set<String>
+    let staleTargetIDs: Set<String>
+    let failedTargetIDs: Set<String>
+
+    static let empty = TokenScanHealth(
+        freshTargetIDs: [],
+        staleTargetIDs: [],
+        failedTargetIDs: []
+    )
+
+    var totalCount: Int {
+        freshTargetIDs.count + staleTargetIDs.count + failedTargetIDs.count
+    }
+
+    var freshCount: Int { freshTargetIDs.count }
+    var staleCount: Int { staleTargetIDs.count }
+    var failedCount: Int { failedTargetIDs.count }
+
+    func markingFailed(_ targetIDs: Set<String>) -> Self {
+        Self(
+            freshTargetIDs: freshTargetIDs.subtracting(targetIDs),
+            staleTargetIDs: staleTargetIDs.subtracting(targetIDs),
+            failedTargetIDs: failedTargetIDs.union(targetIDs)
+        )
+    }
+}
+
 enum LocalTokenScanTargetDiscovery {
     static func discover(
         threads: [CodexThread],

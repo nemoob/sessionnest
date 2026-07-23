@@ -50,27 +50,47 @@ struct RefreshButtonVisualState: Equatable {
 
 enum StatusPopoverScreenshotFeedback: Equatable {
     case idle
-    case copied
+    case safeCopied
+    case fullCopied
     case failed
 
     var systemImage: String {
         switch self {
         case .idle: "camera"
-        case .copied: "checkmark"
+        case .safeCopied, .fullCopied: "checkmark"
         case .failed: "exclamationmark.triangle"
         }
     }
 
     var title: String {
         switch self {
-        case .idle: "复制完整截图（包含账号信息）"
-        case .copied: "完整截图已复制，可直接粘贴"
+        case .idle: "复制安全截图（已隐藏账号；右键可复制完整截图）"
+        case .safeCopied: "安全截图已复制，账号信息已隐藏"
+        case .fullCopied: "完整截图已复制，包含账号信息"
         case .failed: "截图失败，请重试"
         }
     }
 
     var errorText: String? {
         self == .failed ? title : nil
+    }
+
+    var feedbackText: String? {
+        self == .idle ? nil : title
+    }
+}
+
+enum StatusPopoverScreenshotPrivacy: Equatable {
+    case safe
+    case full
+
+    func emailText(_ email: String) -> String {
+        switch self {
+        case .safe:
+            email == "--" ? email : "账号已隐藏"
+        case .full:
+            email
+        }
     }
 }
 
@@ -376,13 +396,16 @@ struct SessionNestStatusPopover: View {
 
     private var overview: some View {
         ScrollView {
-            overviewContent(includesScreenshotAction: true)
+            overviewContent(includesScreenshotAction: true, screenshotPrivacy: nil)
                 .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
         }
         .padding(.trailing, -SessionNestStatusPopoverLayout.scrollViewTrailingExtension)
     }
 
-    private func overviewContent(includesScreenshotAction: Bool) -> some View {
+    private func overviewContent(
+        includesScreenshotAction: Bool,
+        screenshotPrivacy: StatusPopoverScreenshotPrivacy?
+    ) -> some View {
         let now = Int64(Date().timeIntervalSince1970)
         let calendar = Calendar.current
         let statisticsScope = StatusPopoverStatisticsScope.resolve(
@@ -404,6 +427,10 @@ struct SessionNestStatusPopover: View {
             snapshot: snapshot,
             isScanningTokenUsage: model.isScanningTokenUsage
         )
+        let tokenScanHealth = TokenScanHealthStatus(
+            health: model.tokenScanHealth,
+            isScanning: model.isScanningTokenUsage
+        )
         let resetCredits = MenuBarResetCreditsStatus(summary: model.resetCreditsSnapshot)
         let refreshButtonState = RefreshButtonVisualState(isRefreshing: status.showsProgress)
 
@@ -414,9 +441,12 @@ struct SessionNestStatusPopover: View {
                         .font(.headline)
                     HStack(spacing: 4) {
                         Text(status.account.planText)
-                        Text(status.account.emailText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        Text(
+                            screenshotPrivacy?.emailText(status.account.emailText)
+                                ?? status.account.emailText
+                        )
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     }
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -445,9 +475,14 @@ struct SessionNestStatusPopover: View {
                     if includesScreenshotAction {
                         StatusPopoverHeaderButton(
                             title: screenshotFeedback.title,
-                            action: copyCompleteOverview
+                            action: { copyOverview(privacy: .safe) }
                         ) {
                             Image(systemName: screenshotFeedback.systemImage)
+                        }
+                        .contextMenu {
+                            Button("复制完整截图（包含账号信息）") {
+                                copyOverview(privacy: .full)
+                            }
                         }
                     }
                     StatusPopoverHeaderButton(
@@ -466,10 +501,10 @@ struct SessionNestStatusPopover: View {
                 }
             }
 
-            if includesScreenshotAction, let errorText = screenshotFeedback.errorText {
-                Text(errorText)
+            if includesScreenshotAction, let feedbackText = screenshotFeedback.feedbackText {
+                Text(feedbackText)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(screenshotFeedback == .failed ? Color.red : Color.secondary)
             }
 
             if let notice = AppUpdateNotice.resolve(updateChecker.state) {
@@ -590,6 +625,10 @@ struct SessionNestStatusPopover: View {
             Text(status.tokenCoverageText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Text(tokenScanHealth.text)
+                .font(.caption)
+                .foregroundStyle(tokenScanHealth.isWarning ? Color.orange : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
             HStack {
@@ -602,27 +641,32 @@ struct SessionNestStatusPopover: View {
         }
     }
 
-    private var screenshotOverview: some View {
+    private func screenshotOverview(privacy: StatusPopoverScreenshotPrivacy) -> some View {
         let theme = AppTheme(storedValue: storedTheme)
         let colorScheme = StatusPopoverScreenshotBackground.colorScheme(
             for: theme,
             systemColorScheme: systemColorScheme
         )
 
-        return overviewContent(includesScreenshotAction: false)
-            .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
-            .padding(16)
-            .frame(width: SessionNestStatusPopoverLayout.width)
-            .fixedSize(horizontal: false, vertical: true)
-            .background(StatusPopoverScreenshotBackground.color(for: colorScheme))
-            .environment(\.colorScheme, colorScheme)
+        return overviewContent(
+            includesScreenshotAction: false,
+            screenshotPrivacy: privacy
+        )
+        .padding(.trailing, SessionNestStatusPopoverLayout.scrollContentTrailingGutter)
+        .padding(16)
+        .frame(width: SessionNestStatusPopoverLayout.width)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(StatusPopoverScreenshotBackground.color(for: colorScheme))
+        .environment(\.colorScheme, colorScheme)
     }
 
     @MainActor
-    private func copyCompleteOverview() {
+    private func copyOverview(privacy: StatusPopoverScreenshotPrivacy) {
         do {
-            try StatusPopoverScreenshotCopier().copy(content: screenshotOverview)
-            screenshotFeedback = .copied
+            try StatusPopoverScreenshotCopier().copy(
+                content: screenshotOverview(privacy: privacy)
+            )
+            screenshotFeedback = privacy == .safe ? .safeCopied : .fullCopied
         } catch {
             screenshotFeedback = .failed
         }

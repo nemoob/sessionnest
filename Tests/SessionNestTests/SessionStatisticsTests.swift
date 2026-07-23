@@ -403,6 +403,37 @@ struct SessionStatisticsTests {
         #expect(noProjectRow?.usage.totalTokens == 50)
     }
 
+    @Test func childOnlyUsageIsMeasuredAndAttributedToItsVisibleParent() {
+        let parent = thread(
+            "parent",
+            title: "Parent",
+            cwd: "/work/parent",
+            activityTimestamp: 100
+        )
+        let childUsage = usage(60, 40, 10, 5, 70)
+
+        let snapshot = SessionStatistics.build(
+            threads: [parent],
+            coveredThreadIDs: ["child"],
+            dailyUsage: [daily("child", day: 100, usage: childUsage)],
+            threadProjects: [:],
+            usageAttributionThreadIDs: ["child": parent.id],
+            timeFilter: .all,
+            calendar: calendar(timeZone: "UTC"),
+            now: 1_000
+        )
+
+        #expect(snapshot.totalSessionCount == 1)
+        #expect(snapshot.measuredSessionCount == 1)
+        #expect(snapshot.averageTokensPerMeasuredSession == 70)
+        #expect(snapshot.totalUsage == childUsage)
+        #expect(snapshot.dailyPoints.map(\.usage) == [childUsage])
+        #expect(snapshot.sessionRows.map(\.threadID) == [parent.id])
+        #expect(snapshot.sessionRows.map(\.usage) == [childUsage])
+        #expect(snapshot.projectRows.map(\.projectPath) == [parent.cwd])
+        #expect(snapshot.projectRows.map(\.usage) == [childUsage])
+    }
+
     @Test func emptyInputBuildsEmptySnapshot() {
         let snapshot = SessionStatistics.build(
             threads: [],

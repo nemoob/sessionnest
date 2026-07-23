@@ -3,6 +3,36 @@ import Testing
 
 @testable import SessionNest
 
+@Test func tokenScanHealthStatusDistinguishesProgressFreshAndIncompleteData() {
+    let health = TokenScanHealth(
+        freshTargetIDs: ["fresh"],
+        staleTargetIDs: ["stale"],
+        failedTargetIDs: ["failed"]
+    )
+
+    #expect(
+        TokenScanHealthStatus(health: health, isScanning: true).text
+            == "正在追平 Token 日志 · 1 / 3 当前可用"
+    )
+    #expect(TokenScanHealthStatus(health: health, isScanning: true).isWarning == false)
+    #expect(
+        TokenScanHealthStatus(health: health, isScanning: false).text
+            == "1 个日志待更新，1 个扫描失败；当前统计可能偏低"
+    )
+    #expect(TokenScanHealthStatus(health: health, isScanning: false).isWarning)
+
+    let fresh = TokenScanHealth(
+        freshTargetIDs: ["parent", "child"],
+        staleTargetIDs: [],
+        failedTargetIDs: []
+    )
+    #expect(
+        TokenScanHealthStatus(health: fresh, isScanning: false).text
+            == "Token 日志已追平 2 / 2（含子代理）"
+    )
+    #expect(TokenScanHealthStatus(health: fresh, isScanning: false).isWarning == false)
+}
+
 @Test func menuBarStatusFormatsQuotaCycleTokenUsage() {
     let measured = MenuBarStatus(
         totalSessions: 1,

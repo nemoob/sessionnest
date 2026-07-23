@@ -12,9 +12,25 @@ SessionNest is an independent open-source project and is not affiliated with or 
 ## Requirements
 
 - macOS 14 or later
-- Xcode with Swift 6.2 or later
+- Apple silicon for the downloadable build
 - A bundled Codex CLI from `/Applications/Codex.app`, `~/Applications/Codex.app`, or
   `/Applications/ChatGPT.app`
+
+## Install
+
+1. Download the latest `SessionNest-*-macos-arm64.zip` from
+   [GitHub Releases](https://github.com/nemoob/sessionnest/releases/latest).
+2. Extract the archive and move `SessionNest.app` to `/Applications`.
+3. On first launch, Control-click the app and choose **Open**. If macOS still blocks it, allow it
+   from **System Settings → Privacy & Security**.
+
+The downloadable build currently supports Apple silicon Macs. Intel users can build from source.
+Release archives are ad-hoc signed, not Developer ID signed or Apple notarized.
+
+To update, quit SessionNest and replace the existing app with the newer release. To uninstall,
+quit SessionNest and remove `/Applications/SessionNest.app`. Its local metadata remains at
+`~/Library/Application Support/SessionNest/manager.sqlite` unless you remove that file separately;
+Codex conversations are never stored there and are not deleted.
 
 ## Features
 
@@ -34,6 +50,8 @@ SessionNest is an independent open-source project and is not affiliated with or 
 
 ## Build and test
 
+Building from source requires Xcode with Swift 6.2 or later.
+
 ```bash
 xcrun swift build
 bash Scripts/check.sh
@@ -46,12 +64,9 @@ bash Scripts/package-app.sh
 open "dist/SessionNest.app"
 ```
 
-The packaging script builds a release executable, creates the macOS icon set, assembles the app
-bundle, and applies an ad-hoc signature.
-
-This repository is source-only: it does not include a notarized or Developer ID-signed binary.
-Locally packaged apps use ad-hoc signing and may require the usual macOS confirmation before first
-launch.
+The packaging script builds for the current host architecture, creates the macOS icon set,
+assembles the app bundle, and applies an ad-hoc signature. Locally packaged apps are not notarized
+or Developer ID signed.
 
 ## Architecture
 

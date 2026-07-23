@@ -541,7 +541,7 @@ import Testing
     #expect(try await store.loadThreadTokenDailyUsage() == originalDailyUsage)
 }
 
-@Test func tokenUsageUnobservedRebuildRemovesExistingCache() async throws {
+@Test func tokenUsageUnobservedRebuildStoresCompletedEmptyScan() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     let store = try MetadataStore(databaseURL: directory.appendingPathComponent("manager.sqlite"))
@@ -568,7 +568,7 @@ import Testing
         fileModificationTimeNS: 500,
         parserVersion: 2,
         result: tokenScanResult(
-            offset: 90,
+            offset: 100,
             maximum: .zero,
             dailyUsage: [:],
             latestEventTimestamp: nil,
@@ -577,7 +577,19 @@ import Testing
         rebuild: true
     )
 
-    #expect(try await store.loadThreadTokenCache().isEmpty)
+    #expect(
+        try await store.loadThreadTokenCache()["measured"]
+            == ThreadTokenCache(
+                threadID: "measured",
+                rolloutPath: "/rollout/rebuilt.jsonl",
+                fileSize: 100,
+                fileModificationTimeNS: 500,
+                scannedOffset: 100,
+                maximum: .zero,
+                latestEventTimestamp: nil,
+                parserVersion: 2
+            )
+    )
     #expect(try await store.loadThreadTokenDailyUsage().isEmpty)
 }
 

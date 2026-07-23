@@ -893,7 +893,7 @@ import Testing
 }
 
 @MainActor
-@Test func tokenScanReloadPublishesCachedUsage() async throws {
+@Test func tokenScanReloadExcludesStaleCacheUntilAppendCatchesUp() async throws {
     let fixture = try SessionModelFixture(threadID: "cached", createRollout: true)
     defer { fixture.remove() }
     let cachedResult = tokenScanResult(total: 120, dayStart: 100)
@@ -911,7 +911,9 @@ import Testing
     let model = SessionListModel(
         client: fixture.client,
         store: fixture.store,
-        tokenScanOperation: { _, _, _, _ in try await probe.scan(result: cachedResult) },
+        tokenScanOperation: { _, _, baseline, _ in
+            try await probe.scan(result: TokenScanResult(offset: 11, state: baseline))
+        },
         threadReloadOperation: { ([fixture.thread], []) }
     )
     model.timeFilter = .all
@@ -922,14 +924,80 @@ import Testing
     #expect(model.isScanningTokenUsage)
     #expect(model.threadTokenCache[fixture.thread.id]?.maximum.totalTokens == 120)
     #expect(model.threadTokenDailyUsage.map(\.usage.totalTokens) == [120])
-    #expect(model.statisticsSnapshot.totalUsage.totalTokens == 120)
+    #expect(model.statisticsSnapshot.totalUsage == .zero)
+    #expect(model.tokenScanHealth.freshCount == 0)
+    #expect(model.tokenScanHealth.staleCount == 1)
+    #expect(model.tokenScanHealth.failedCount == 0)
     #expect(model.errorMessage == nil)
     await probe.release()
     try await waitForTokenCondition { !model.isScanningTokenUsage }
+    #expect(model.statisticsSnapshot.totalUsage.totalTokens == 120)
+    #expect(model.tokenScanHealth.freshCount == 1)
+    #expect(model.tokenScanHealth.staleCount == 0)
+    #expect(model.tokenScanHealth.failedCount == 0)
 }
 
 @MainActor
-@Test func tokenScanIncludesSubagentUsageWithoutAddingAVisibleSession() async throws {
+@Test func tokenReloadWithholdsParentCoverageUntilTargetDiscoveryCompletes() async throws {
+    // 创建一个本地父会话，并预置与当前空日志完全匹配的可复用缓存。
+    let fixture = try SessionModelFixture(threadID: "cached-parent", createRollout: true)
+    defer { fixture.remove() }
+    let rolloutURL = URL(fileURLWithPath: fixture.thread.path!)
+    let attributes = try FileManager.default.attributesOfItem(atPath: rolloutURL.path)
+    let modificationDate = try #require(attributes[.modificationDate] as? Date)
+    let modificationTimeNS = Int64(
+        (modificationDate.timeIntervalSince1970 * 1_000_000_000).rounded()
+    )
+    let cachedResult = tokenScanResult(total: 120, dayStart: 100)
+    try await fixture.store.saveThreadTokenScan(
+        threadID: fixture.thread.id,
+        rolloutPath: rolloutURL.path,
+        fileSize: 0,
+        fileModificationTimeNS: modificationTimeNS,
+        parserVersion: 3,
+        result: cachedResult,
+        rebuild: true
+    )
+    // 暂停目标发现，检查 reload 已发布会话但尚未掌握子代理集合时的中间状态。
+    let discovery = DeferredTokenDiscoveryProbe(
+        targets: [
+            TokenScanTarget(
+                id: fixture.thread.id,
+                attributionThreadID: fixture.thread.id,
+                url: rolloutURL
+            )
+        ]
+    )
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        tokenScanTargetDiscoveryOperation: { _ in await discovery.discover() },
+        threadReloadOperation: { ([fixture.thread], []) }
+    )
+    model.timeFilter = .all
+
+    // reload 异步等待 discovery，让测试能观察目录发现期间的公开状态。
+    let reloadTask = Task { await model.reload() }
+    try await waitForTokenCondition { await discovery.started }
+
+    // 缓存可以先载入内存，但覆盖与统计必须保持为空，不能闪现仅父日志的 120 Token。
+    #expect(model.threadTokenCache[fixture.thread.id]?.maximum.totalTokens == 120)
+    #expect(model.isScanningTokenUsage)
+    #expect(model.tokenCoveredThreadIDs.isEmpty)
+    #expect(model.tokenAttributionThreadIDs.isEmpty)
+    #expect(model.statisticsSnapshot.totalUsage == .zero)
+    #expect(model.quotaCycleStatisticsSnapshot == nil)
+
+    // 完整目标返回后允许扫描发布可信覆盖，并恢复缓存中的统计。
+    await discovery.release()
+    await reloadTask.value
+    try await waitForTokenCondition { !model.isScanningTokenUsage }
+    #expect(model.tokenCoveredThreadIDs == [fixture.thread.id])
+    #expect(model.statisticsSnapshot.totalUsage.totalTokens == 120)
+}
+
+@MainActor
+@Test func tokenScanAttributesChildOnlyUsageAfterAnEmptyParentScan() async throws {
     let fixture = try SessionModelFixture(threadID: "parent", createRollout: true)
     defer { fixture.remove() }
     let childURL = fixture.directoryURL.appendingPathComponent("child.jsonl")
@@ -938,7 +1006,9 @@ import Testing
         client: fixture.client,
         store: fixture.store,
         tokenScanOperation: { url, _, _, _ in
-            tokenScanResult(total: url == childURL ? 70 : 100, dayStart: 100)
+            url == childURL
+                ? tokenScanResult(total: 70, dayStart: 100)
+                : TokenScanResult(offset: 0, state: .empty)
         },
         tokenScanTargetDiscoveryOperation: { _ in
             [
@@ -961,11 +1031,155 @@ import Testing
     await model.reload()
     try await waitForTokenCondition { !model.isScanningTokenUsage }
 
-    #expect(model.statisticsSnapshot.totalUsage.totalTokens == 170)
+    #expect(model.statisticsSnapshot.totalUsage.totalTokens == 70)
     #expect(model.statisticsSnapshot.totalSessionCount == 1)
     #expect(model.statisticsSnapshot.measuredSessionCount == 1)
     #expect(model.statisticsSnapshot.sessionRows.map(\.threadID) == [fixture.thread.id])
-    #expect(model.statisticsSnapshot.sessionRows.map(\.usage.totalTokens) == [170])
+    #expect(model.statisticsSnapshot.sessionRows.map(\.usage.totalTokens) == [70])
+    #expect(model.tokenScanHealth.freshCount == 2)
+    #expect(model.tokenCoveredThreadIDs == ["child"])
+}
+
+@MainActor
+@Test func tokenScanExcludesPartialChildUsageWhenItsParentScanFails() async throws {
+    let fixture = try SessionModelFixture(threadID: "parent", createRollout: true)
+    defer { fixture.remove() }
+    let parentURL = URL(fileURLWithPath: fixture.thread.path!)
+    let childURL = fixture.directoryURL.appendingPathComponent("child.jsonl")
+    try Data().write(to: childURL)
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        tokenScanOperation: { url, _, _, _ in
+            if url == parentURL { throw TokenScanTestError.expectedFailure }
+            return tokenScanResult(total: 70, dayStart: 100)
+        },
+        tokenScanTargetDiscoveryOperation: { _ in
+            [
+                TokenScanTarget(
+                    id: fixture.thread.id,
+                    attributionThreadID: fixture.thread.id,
+                    url: parentURL
+                ),
+                TokenScanTarget(
+                    id: "child",
+                    attributionThreadID: fixture.thread.id,
+                    url: childURL
+                ),
+            ]
+        },
+        threadReloadOperation: { ([fixture.thread], []) }
+    )
+    model.timeFilter = .all
+
+    await model.reload()
+    try await waitForTokenCondition { !model.isScanningTokenUsage }
+
+    #expect(model.tokenScanHealth.freshTargetIDs == ["child"])
+    #expect(model.tokenScanHealth.failedTargetIDs == [fixture.thread.id])
+    #expect(model.tokenCoveredThreadIDs.isEmpty)
+    #expect(model.statisticsSnapshot.totalUsage == .zero)
+    #expect(model.statisticsSnapshot.measuredSessionCount == 0)
+    #expect(model.statisticsSnapshot.sessionRows.isEmpty)
+}
+
+@MainActor
+@Test func tokenScanRebuildsGrowingEmptyChildCacheBeforeCountingUsage() async throws {
+    let fixture = try SessionModelFixture(threadID: "parent", createRollout: true)
+    defer { fixture.remove() }
+    let childURL = fixture.directoryURL.appendingPathComponent("child.jsonl")
+    let lines = [
+        #"{"timestamp":"2026-07-20T06:12:34.472Z","type":"session_meta","payload":{"id":"019f7e27-a0fa-7f33-a653-c4318fa5dd48","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}"#,
+        #"{"timestamp":"2026-07-20T06:12:34.472Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":400,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":500}}}}"#,
+        #"{"timestamp":"2026-07-20T06:12:34.805Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019f7e26-8eb1-74f1-a607-c0c7ca678fd3"}}"#,
+        #"{"timestamp":"2026-07-20T06:12:34.805Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":520,"cached_input_tokens":410,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":520}}}}"#,
+        #"{"timestamp":"2026-07-20T06:12:34.855Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019f7e27-a3a5-7143-bf0a-055beb48d8f9"}}"#,
+        #"{"timestamp":"2026-07-20T06:13:00.996Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":580,"cached_input_tokens":450,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":580}}}}"#,
+    ]
+    try Data((lines[0] + "\n").utf8).write(to: childURL)
+    let target = TokenScanTarget(
+        id: "child",
+        attributionThreadID: fixture.thread.id,
+        url: childURL
+    )
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        tokenScanTargetDiscoveryOperation: { _ in [target] },
+        threadReloadOperation: { ([fixture.thread], []) }
+    )
+    model.timeFilter = .all
+
+    await model.reload()
+    try await waitForTokenCondition { !model.isScanningTokenUsage }
+    #expect(model.threadTokenCache["child"]?.latestEventTimestamp == nil)
+    #expect(model.tokenScanHealth.freshTargetIDs == ["child"])
+    #expect(model.statisticsSnapshot.measuredSessionCount == 0)
+
+    try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: childURL)
+    await model.startTokenUsageScan(for: [fixture.thread])
+    try await waitForTokenCondition { !model.isScanningTokenUsage }
+
+    #expect(model.statisticsSnapshot.totalUsage.totalTokens == 60)
+    #expect(model.statisticsSnapshot.measuredSessionCount == 1)
+    #expect(model.statisticsSnapshot.sessionRows.map(\.threadID) == [fixture.thread.id])
+    #expect(model.statisticsSnapshot.sessionRows.map(\.usage.totalTokens) == [60])
+}
+
+@MainActor
+@Test func tokenScanRebuildsGrowingChildWhileForkReplayIsStillInProgress() async throws {
+    // 子代理首段包含父会话 replay 检查点，但还没有进入自己的有效任务阶段。
+    let fixture = try SessionModelFixture(threadID: "parent", createRollout: true)
+    defer { fixture.remove() }
+    let childURL = fixture.directoryURL.appendingPathComponent("replaying-child.jsonl")
+    let childID = "019f7e27-a0fa-7f33-a653-c4318fa5dd48"
+    let initialLines = [
+        #"{"timestamp":"2026-07-20T06:12:34.472Z","type":"session_meta","payload":{"id":"019f7e27-a0fa-7f33-a653-c4318fa5dd48","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}"#,
+        #"{"timestamp":"2026-07-20T06:12:34.500Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":400,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":500}}}}"#,
+        #"{"timestamp":"2026-07-20T06:12:34.600Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019f7e26-8eb1-74f1-a607-c0c7ca678fd3"}}"#,
+        #"{"timestamp":"2026-07-20T06:12:34.700Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":520,"cached_input_tokens":410,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":520}}}}"#,
+    ]
+    try Data((initialLines.joined(separator: "\n") + "\n").utf8).write(to: childURL)
+    let target = TokenScanTarget(
+        id: childID,
+        attributionThreadID: fixture.thread.id,
+        url: childURL
+    )
+    let model = SessionListModel(
+        client: fixture.client,
+        store: fixture.store,
+        tokenScanTargetDiscoveryOperation: { _ in [target] },
+        threadReloadOperation: { ([fixture.thread], []) }
+    )
+    model.timeFilter = .all
+
+    // 首次全量扫描只建立 replay 基线，不应产生子代理自身用量。
+    await model.reload()
+    try await waitForTokenCondition { !model.isScanningTokenUsage }
+    #expect(model.threadTokenCache[childID]?.maximum.totalTokens == 520)
+    #expect(model.threadTokenDailyUsage.isEmpty)
+    #expect(model.statisticsSnapshot.totalUsage == .zero)
+
+    // 在有效 task_started 之前再追加 replay 检查点，增量恢复会误把 20 Token 当成子代理用量。
+    let continuedReplay =
+        #"{"timestamp":"2026-07-20T06:12:34.800Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":540,"cached_input_tokens":420,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":540}}}}"#
+    // 以追加方式模拟同一个子代理日志继续增长，保留首段缓存作为恢复基线。
+    do {
+        let appendHandle = try FileHandle(forWritingTo: childURL)
+        // 完成追加后关闭句柄，让随后读取到稳定的文件大小和修改时间。
+        defer { try? appendHandle.close() }
+        // 定位到现有日志末尾，确保第二段不会覆盖 session_meta。
+        try appendHandle.seekToEnd()
+        // 写入仍处于 fork replay 的检查点，随后立即触发新一轮扫描。
+        try appendHandle.write(contentsOf: Data((continuedReplay + "\n").utf8))
+    }
+    await model.startTokenUsageScan(for: [fixture.thread])
+    try await waitForTokenCondition { !model.isScanningTokenUsage }
+
+    // growing subagent 必须从 session_meta 重建阶段，第二段 replay 仍然不能进入统计。
+    #expect(model.threadTokenCache[childID]?.maximum.totalTokens == 540)
+    #expect(model.threadTokenDailyUsage.isEmpty)
+    #expect(model.statisticsSnapshot.totalUsage == .zero)
 }
 
 @MainActor
@@ -1016,6 +1230,10 @@ import Testing
 
     #expect(model.threadTokenCache[fixture.thread.id]?.maximum.totalTokens == 80)
     #expect(model.threadTokenDailyUsage.map(\.usage.totalTokens) == [80])
+    #expect(model.tokenScanHealth.freshCount == 0)
+    #expect(model.tokenScanHealth.staleCount == 0)
+    #expect(model.tokenScanHealth.failedTargetIDs == [fixture.thread.id])
+    #expect(model.tokenCoveredThreadIDs.isEmpty)
     #expect(model.errorMessage == nil)
 }
 
@@ -1085,6 +1303,10 @@ import Testing
     try await waitForTokenCondition { !model.isScanningTokenUsage }
 
     #expect(await probe.offsets == [0])
+    #expect(model.tokenScanHealth.freshCount == 0)
+    #expect(model.tokenScanHealth.staleTargetIDs == [fixture.thread.id])
+    #expect(model.tokenScanHealth.failedCount == 0)
+    #expect(model.tokenCoveredThreadIDs.isEmpty)
 }
 
 private actor ClassificationTaskReplacementProbe {
@@ -1246,6 +1468,36 @@ private actor DeferredTokenScanProbe {
     }
 
     func release() {
+        released = true
+    }
+}
+
+private actor DeferredTokenDiscoveryProbe {
+    // discovery 返回的完整目标集合由测试固定注入。
+    private let targets: [TokenScanTarget]
+    // started 用于让主线程准确观察 discovery 已经挂起。
+    private(set) var started = false
+    // released 控制何时允许完整目标集合发布。
+    private var released = false
+
+    init(targets: [TokenScanTarget]) {
+        // 保存固定目标，确保测试只验证发布时序而不依赖文件枚举。
+        self.targets = targets
+    }
+
+    func discover() async -> [TokenScanTarget] {
+        // 标记 discovery 已进入，唤醒测试侧中间状态断言。
+        started = true
+        // 未释放前持续让出执行权，模拟大型日志目录的发现延迟。
+        while !released {
+            await Task.yield()
+        }
+        // 释放后一次性返回完整目标集。
+        return targets
+    }
+
+    func release() {
+        // 允许挂起的 discovery 完成并继续扫描。
         released = true
     }
 }

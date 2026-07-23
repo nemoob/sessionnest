@@ -457,7 +457,13 @@ actor CodexClient {
 }
 
 private struct InitializeParams: Encodable {
-    let clientInfo = ClientInfo(name: "sessionnest", title: "SessionNest", version: "0.1.0")
+    // 握手版本优先跟随当前 App 包；测试或裸可执行环境没有版本信息时使用开发版本号。
+    let clientInfo = ClientInfo(
+        name: "sessionnest",
+        title: "SessionNest",
+        version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "0.0.0"
+    )
     let capabilities = Capabilities(experimentalApi: false)
 }
 
