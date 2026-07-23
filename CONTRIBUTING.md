@@ -10,4 +10,12 @@ Before opening a pull request, run:
 Scripts/check.sh
 ```
 
+The full check includes a deterministic synthetic benchmark for 20,000 Token checkpoints. It uses
+temporary generated JSONL only and fails when scanning exceeds the documented five-second
+regression budget. Run it independently with:
+
+```bash
+xcrun swift test --filter SessionPerformanceBenchmarkTests
+```
+
 New dependencies require maintainer agreement before implementation.

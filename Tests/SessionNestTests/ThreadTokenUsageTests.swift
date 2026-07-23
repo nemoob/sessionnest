@@ -5,6 +5,47 @@ import Testing
 
 @Suite("ThreadTokenUsageTests")
 struct ThreadTokenUsageTests {
+    @Test func tokenUsageDefinesNonCachedTokensWithoutDoubleCountingOrUnderflow() {
+        #expect(usage(100, 80, 20, 10, 120).nonCachedTokens == 40)
+        #expect(usage(50, 80, 0, 0, 50).nonCachedTokens == 0)
+        #expect(usage(50, -10, 0, 0, 50).nonCachedTokens == 50)
+        #expect(usage(0, 0, 0, 0, -1).nonCachedTokens == 0)
+    }
+
+    @Test func tokenUsageDefinitionSeparatesLocalTokensFromServerQuota() {
+        #expect(TokenUsageDefinition.explanation.contains("总 Token"))
+        #expect(TokenUsageDefinition.explanation.contains("非缓存 Token"))
+        #expect(TokenUsageDefinition.explanation.contains("Codex 服务端百分比"))
+        #expect(TokenUsageDefinition.explanation.contains("本地 Token 不参与换算"))
+    }
+
+    @Test func recalculationRangeUsesInclusiveLocalDaysAcrossDST() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let selectedDay = try #require(
+            calendar.date(
+                from: DateComponents(year: 2026, month: 3, day: 8, hour: 12)
+            ))
+        let range = try #require(
+            TokenUsageRecalculationRange(
+                from: selectedDay,
+                through: selectedDay,
+                calendar: calendar
+            ))
+
+        #expect(range.endDayExclusive - range.startDay == 23 * 60 * 60)
+        #expect(range.contains(range.startDay))
+        #expect(range.contains(range.endDayExclusive - 1))
+        #expect(!range.contains(range.endDayExclusive))
+        #expect(
+            TokenUsageRecalculationRange(
+                from: selectedDay.addingTimeInterval(24 * 60 * 60),
+                through: selectedDay,
+                calendar: calendar
+            ) == nil
+        )
+    }
+
     @Test func subagentScanExcludesForkedParentHistory() throws {
         let lines = [
             #"{"timestamp":"2026-07-20T06:12:34.472Z","type":"session_meta","payload":{"id":"019f7e27-a0fa-7f33-a653-c4318fa5dd48","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}"#,
@@ -61,6 +102,295 @@ struct ThreadTokenUsageTests {
         )
     }
 
+    @Test func indexedDiscoveryReusesPositiveAndNegativeMetadataWithoutReadingFilesAgain() throws {
+        // 创建独立根目录，避免用户真实 Codex 日志影响缓存命中数量。
+        let root = try discoveryRoot()
+        // 测试完成后清理日志和目录。
+        defer { try? FileManager.default.removeItem(at: root) }
+        // 父会话空日志同时验证成功读取后的负缓存。
+        let parentURL = root.appendingPathComponent("parent.jsonl")
+        // 普通大日志验证发现读取始终限制在前 64 KiB。
+        let ordinaryURL = root.appendingPathComponent("ordinary.jsonl")
+        // 子代理日志提供可复用的正向父子元数据。
+        let childURL = root.appendingPathComponent("child.jsonl")
+        // 写入空父日志。
+        try Data().write(to: parentURL)
+        // 写入超过前缀上限的普通日志。
+        try Data(repeating: 0x61, count: 80 * 1024).write(to: ordinaryURL)
+        // 写入完整子代理元数据。
+        try subagentData(id: "child", parentID: "parent").write(to: childURL)
+        // 只把父会话暴露给 SessionNest，子代理必须由目录发现补齐。
+        let parent = discoveryThread(id: "parent", url: parentURL)
+
+        // 首轮没有缓存，因此三个 JSONL 都必须读取一次。
+        let first = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: [:],
+            parserVersion: 1,
+            roots: [root]
+        )
+        // 把首轮增量模拟为持久层已保存的完整缓存。
+        let cache = applying(first, to: [:])
+        // 第二轮输入完全一致，应只枚举属性而不再打开日志正文。
+        let second = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: cache,
+            parserVersion: 1,
+            roots: [root]
+        )
+
+        // 首轮看到了三个候选文件并实际读取三次。
+        #expect(first.metrics.enumeratedJSONLCount == 3)
+        #expect(first.metrics.metadataReadFileCount == 3)
+        // 大日志最多贡献 64 KiB，另加子代理元数据的实际长度。
+        #expect(
+            first.metrics.metadataReadBytes
+                == Int64(64 * 1024 + subagentData(id: "child", parentID: "parent").count))
+        // 父日志和普通日志都应保存 ID 为空的可信负缓存。
+        #expect(cache[parentURL.standardizedFileURL.path]?.subagentID == nil)
+        #expect(cache[ordinaryURL.standardizedFileURL.path]?.subagentID == nil)
+        // 第二轮三个文件全部命中，内容读取和缓存更新都必须为零。
+        #expect(second.metrics.cacheHitCount == 3)
+        #expect(second.metrics.metadataReadFileCount == 0)
+        #expect(second.metrics.metadataReadBytes == 0)
+        #expect(second.changedCacheEntries.isEmpty)
+        // 正缓存复用后仍需返回相同父子目标。
+        #expect(second.targets.map(\.id).sorted() == ["child", "parent"])
+        #expect(second.targets.first { $0.id == "child" }?.attributionThreadID == "parent")
+    }
+
+    @Test func indexedDiscoveryReadsOnlyNewAndChangedFilesAndRemovesDeletedPaths() throws {
+        // 创建只包含测试日志的发现根目录。
+        let root = try discoveryRoot()
+        // 测试后移除全部临时内容。
+        defer { try? FileManager.default.removeItem(at: root) }
+        // 父日志保证发现逻辑会遍历该根目录。
+        let parentURL = root.appendingPathComponent("parent.jsonl")
+        // 已有子代理用于验证修改文件的单独重读。
+        let childURL = root.appendingPathComponent("child.jsonl")
+        // 后续新增并删除的子代理用于验证增量和清理集合。
+        let addedURL = root.appendingPathComponent("added.jsonl")
+        // 写入初始父日志。
+        try Data().write(to: parentURL)
+        // 写入初始子代理关系。
+        try subagentData(id: "child", parentID: "parent").write(to: childURL)
+        // 构造唯一可见父会话。
+        let parent = discoveryThread(id: "parent", url: parentURL)
+
+        // 首轮建立父日志和子代理日志缓存。
+        let first = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: [:],
+            parserVersion: 1,
+            roots: [root]
+        )
+        // 保存首轮缓存作为第二轮输入。
+        let firstCache = applying(first, to: [:])
+        // 新文件是第二轮唯一发生变化的路径。
+        try subagentData(id: "added", parentID: "parent").write(to: addedURL)
+        // 第二轮应复用两个旧文件，只读取新增日志。
+        let second = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: firstCache,
+            parserVersion: 1,
+            roots: [root]
+        )
+        // 合并第二轮缓存，为删除判断提供完整历史集合。
+        let secondCache = applying(second, to: firstCache)
+
+        // 新增文件只触发一次前缀读取。
+        #expect(second.metrics.cacheHitCount == 2)
+        #expect(second.metrics.metadataReadFileCount == 1)
+        #expect(
+            second.changedCacheEntries.map(\.rolloutPath) == [addedURL.standardizedFileURL.path])
+        #expect(second.removedCachePaths.isEmpty)
+
+        // 给已有子代理追加内容，确保 size 变化而不依赖文件系统 mtime 精度。
+        let appendHandle = try FileHandle(forWritingTo: childURL)
+        // 写入前定位到文件末尾。
+        try appendHandle.seekToEnd()
+        // 追加一个换行使该文件成为唯一修改项。
+        try appendHandle.write(contentsOf: Data("\n".utf8))
+        // 关闭句柄，让下一轮取得稳定文件大小。
+        try appendHandle.close()
+        // 删除上一轮新增文件，验证缓存清理只返回消失路径。
+        try FileManager.default.removeItem(at: addedURL)
+        // 第三轮应只读取修改后的 child，并报告 added 已删除。
+        let third = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: secondCache,
+            parserVersion: 1,
+            roots: [root]
+        )
+
+        // 父日志命中、child 重读、deleted 不再枚举。
+        #expect(third.metrics.cacheHitCount == 1)
+        #expect(third.metrics.metadataReadFileCount == 1)
+        #expect(third.changedCacheEntries.map(\.rolloutPath) == [childURL.standardizedFileURL.path])
+        #expect(third.removedCachePaths == [addedURL.standardizedFileURL.path])
+        // 修改后重新解析的子代理仍正确归属父会话。
+        #expect(third.targets.first { $0.id == "child" }?.attributionThreadID == "parent")
+    }
+
+    @Test func indexedDiscoveryRestoresMultilevelAttributionEntirelyFromCache() throws {
+        // 创建多级子代理专用根目录。
+        let root = try discoveryRoot()
+        // 测试结束后清理文件。
+        defer { try? FileManager.default.removeItem(at: root) }
+        // 父日志对应唯一可见会话。
+        let parentURL = root.appendingPathComponent("parent.jsonl")
+        // 中间层子代理指向可见父会话。
+        let middleURL = root.appendingPathComponent("middle.jsonl")
+        // 叶子子代理只指向中间层。
+        let leafURL = root.appendingPathComponent("leaf.jsonl")
+        // 写入空父日志。
+        try Data().write(to: parentURL)
+        // 写入中间父子关系。
+        try subagentData(id: "middle", parentID: "parent").write(to: middleURL)
+        // 写入叶子父子关系。
+        try subagentData(id: "leaf", parentID: "middle").write(to: leafURL)
+        // 可见列表只包含最上层父会话。
+        let parent = discoveryThread(id: "parent", url: parentURL)
+
+        // 首轮读取三个文件并建立完整父链缓存。
+        let first = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: [:],
+            parserVersion: 1,
+            roots: [root]
+        )
+        // 持久化模拟后再次发现，父链必须完全来自缓存。
+        let second = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: applying(first, to: [:]),
+            parserVersion: 1,
+            roots: [root]
+        )
+
+        // 暖缓存不能再次读取任一日志前缀。
+        #expect(second.metrics.cacheHitCount == 3)
+        #expect(second.metrics.metadataReadFileCount == 0)
+        // 中间层和叶子层最终都归属顶层可见父会话。
+        #expect(second.targets.first { $0.id == "middle" }?.attributionThreadID == "parent")
+        #expect(second.targets.first { $0.id == "leaf" }?.attributionThreadID == "parent")
+    }
+
+    @Test func indexedDiscoveryInvalidatesEveryEntryWhenParserVersionChanges() throws {
+        // 创建版本失效测试根目录。
+        let root = try discoveryRoot()
+        // 测试完成后清理。
+        defer { try? FileManager.default.removeItem(at: root) }
+        // 父日志和子日志共同验证正负缓存均按版本失效。
+        let parentURL = root.appendingPathComponent("parent.jsonl")
+        let childURL = root.appendingPathComponent("child.jsonl")
+        // 写入可信负缓存来源。
+        try Data().write(to: parentURL)
+        // 写入可信正缓存来源。
+        try subagentData(id: "child", parentID: "parent").write(to: childURL)
+        // 创建可见父会话。
+        let parent = discoveryThread(id: "parent", url: parentURL)
+        // 第一版解析器建立缓存。
+        let first = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: [:],
+            parserVersion: 1,
+            roots: [root]
+        )
+        // 第二版解析器必须忽略全部旧版本条目。
+        let second = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: applying(first, to: [:]),
+            parserVersion: 2,
+            roots: [root]
+        )
+
+        // 版本变化后没有缓存命中，两个文件都重新读取。
+        #expect(second.metrics.cacheHitCount == 0)
+        #expect(second.metrics.metadataReadFileCount == 2)
+        #expect(second.changedCacheEntries.count == 2)
+        #expect(second.changedCacheEntries.allSatisfy { $0.parserVersion == 2 })
+    }
+
+    @Test func indexedDiscoveryDoesNotWriteNegativeCacheOnFailureAndKeepsKnownChild() throws {
+        // 创建包含故障 JSONL 候选项的根目录。
+        let root = try discoveryRoot()
+        // 测试完成后移除目录。
+        defer { try? FileManager.default.removeItem(at: root) }
+        // 正常父日志使根目录进入发现范围。
+        let parentURL = root.appendingPathComponent("parent.jsonl")
+        // 用 .jsonl 目录稳定模拟无法作为普通日志读取的候选项。
+        let failedURL = root.appendingPathComponent("failed.jsonl", isDirectory: true)
+        // 写入空父日志。
+        try Data().write(to: parentURL)
+        // 创建非普通文件候选项。
+        try FileManager.default.createDirectory(at: failedURL, withIntermediateDirectories: true)
+        // 可见父会话用于解析旧缓存中的子代理归属。
+        let parent = discoveryThread(id: "parent", url: parentURL)
+        // 旧正缓存让失败路径仍能保守恢复 child 目标。
+        let failedEntry = TokenDiscoveryCacheEntry(
+            rolloutPath: failedURL.standardizedFileURL.path,
+            fileSize: 1,
+            fileModificationTimeNS: 1,
+            subagentID: "child",
+            parentThreadID: "parent",
+            parserVersion: 1
+        )
+        // 执行发现时故障路径不能被覆盖为负缓存。
+        let result = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: [failedEntry.rolloutPath: failedEntry],
+            parserVersion: 1,
+            roots: [root]
+        )
+
+        // 非普通 JSONL 被明确计入失败。
+        #expect(result.metrics.failedReadCount == 1)
+        // 故障路径不能出现在成功缓存更新中。
+        #expect(!result.changedCacheEntries.contains { $0.rolloutPath == failedEntry.rolloutPath })
+        // 本轮仍看到了该路径，因此也不能把它误判为已删除。
+        #expect(!result.removedCachePaths.contains(failedEntry.rolloutPath))
+        // 已知正关系被保留，使后续 Token 扫描可以将 child 标记失败。
+        #expect(result.targets.first { $0.id == "child" }?.attributionThreadID == "parent")
+        // 旧关系只作占位，本轮必须排除出可信覆盖直到前缀重新读取成功。
+        #expect(result.uncertainTargetIDs == ["child"])
+        // 已知正向缓存可把影响精确限制在 child，不必撤下其他父会话。
+        #expect(!result.hasUnattributedReadFailure)
+        #expect(result.unreliableTargetIDs == ["child"])
+    }
+
+    @Test func indexedDiscoveryInvalidatesCoverageForUnattributedReadFailure() throws {
+        // 创建独立发现根，模拟原先被负缓存、如今无法确认内容的日志。
+        let root = try discoveryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let parentURL = root.appendingPathComponent("parent.jsonl")
+        let failedURL = root.appendingPathComponent("failed.jsonl", isDirectory: true)
+        try Data().write(to: parentURL)
+        try FileManager.default.createDirectory(at: failedURL, withIntermediateDirectories: true)
+        let parent = discoveryThread(id: "parent", url: parentURL)
+        let negativeEntry = TokenDiscoveryCacheEntry(
+            rolloutPath: failedURL.standardizedFileURL.path,
+            fileSize: 1,
+            fileModificationTimeNS: 1,
+            subagentID: nil,
+            parentThreadID: nil,
+            parserVersion: 1
+        )
+
+        let result = LocalTokenScanTargetDiscovery.discoverIndexed(
+            threads: [parent],
+            cacheEntries: [negativeEntry.rolloutPath: negativeEntry],
+            parserVersion: 1,
+            roots: [root]
+        )
+
+        // 无法读取的变化文件可能已经成为子代理，旧负缓存不能证明其仍无归属。
+        #expect(result.metrics.failedReadCount == 1)
+        #expect(result.uncertainTargetIDs.isEmpty)
+        #expect(result.hasUnattributedReadFailure)
+        // 影响无法缩小时撤下本轮全部目标，避免把少算结果显示为完整覆盖。
+        #expect(result.unreliableTargetIDs == ["parent"])
+    }
+
     @Test func scanStopsWhenCancellationIsRequested() throws {
         let file = try fixture(data: Data("ignored\n".utf8))
         defer { try? FileManager.default.removeItem(at: file) }
@@ -101,6 +431,7 @@ struct ThreadTokenUsageTests {
         #expect(result.maximum == usage(160, 80, 40, 30, 200))
         #expect(latestEventTimestamp == unixSeconds("2026-07-13T16:02:00.000Z"))
         #expect(result.observedCheckpoint)
+        #expect(result.duplicateTokenCheckpointCount == 1)
 
         let firstDay = dayStart("2026-07-13T15:59:00.000Z", calendar: calendar)
         let secondDay = dayStart("2026-07-13T16:01:00.000Z", calendar: calendar)
@@ -158,6 +489,34 @@ struct ThreadTokenUsageTests {
         #expect(resumed.offset == first.offset + Int64(secondLine.utf8.count))
         #expect(resumed.maximum == usage(15, 8, 4, 1, 19))
         #expect(resumed.dailyUsage.values.reduce(.zero, +) == usage(15, 8, 4, 1, 19))
+    }
+
+    @Test func incrementalScanDeduplicatesPersistedCheckpoint() throws {
+        let baseline = TokenScanState(
+            maximum: usage(100, 0, 0, 0, 100),
+            dailyUsage: [:],
+            latestEventTimestamp: unixSeconds("2026-07-13T15:59:00Z"),
+            observedCheckpoint: true
+        )
+        let lines = [
+            #"{"timestamp":"2026-07-13T16:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":100}}}}"#,
+            #"{"timestamp":"2026-07-13T16:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":130}}}}"#,
+        ]
+        let url = try fixture(data: Data((lines.joined(separator: "\n") + "\n").utf8))
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try RolloutTokenScanner.scan(
+            url: url,
+            baseline: baseline,
+            calendar: localCalendar
+        )
+        let day = dayStart("2026-07-13T16:00:00Z", calendar: localCalendar)
+        let newEvent = unixSeconds("2026-07-13T16:01:00Z")
+
+        #expect(result.duplicateTokenCheckpointCount == 1)
+        #expect(result.maximum == usage(120, 0, 10, 0, 130))
+        #expect(result.dailyUsage == [day: usage(20, 0, 10, 0, 30)])
+        #expect(result.timedUsage == [newEvent: usage(20, 0, 10, 0, 30)])
     }
 
     @Test func reboundBelowHistoricalMaximumAddsNoUsage() throws {
@@ -230,6 +589,23 @@ struct ThreadTokenUsageTests {
             decision(fileSize: 100, modificationTime: earlierNanoseconds, parserVersion: 2)
                 == .rebuild)
         #expect(decision(fileSize: 100, modificationTime: laterNanoseconds) == .rebuild)
+    }
+
+    @Test func tokenReconciliationBecomesDueAtTwentyFourHours() {
+        let now: Int64 = 1_784_764_800
+
+        #expect(TokenReconciliationPolicy.isDue(lastReconciledAt: nil, now: now))
+        #expect(
+            !TokenReconciliationPolicy.isDue(
+                lastReconciledAt: now - TokenReconciliationPolicy.minimumInterval + 1,
+                now: now
+            ))
+        #expect(
+            TokenReconciliationPolicy.isDue(
+                lastReconciledAt: now - TokenReconciliationPolicy.minimumInterval,
+                now: now
+            ))
+        #expect(!TokenReconciliationPolicy.isDue(lastReconciledAt: .max, now: now))
     }
 
     @Test func quotaCycleStartTimestampPreservesNonMidnightBoundary() {
@@ -341,6 +717,57 @@ struct ThreadTokenUsageTests {
             .appendingPathExtension("jsonl")
         try data.write(to: url)
         return url
+    }
+
+    private func discoveryRoot() throws -> URL {
+        // 每个测试使用独立 UUID 根目录，避免并发测试互相污染。
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TokenDiscoveryTests-\(UUID().uuidString)", isDirectory: true)
+        // 创建完整目录层级供日志写入。
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // 返回可直接传给发现器的根 URL。
+        return root
+    }
+
+    private func discoveryThread(id: String, url: URL) -> CodexThread {
+        // 生成只包含发现逻辑所需字段的可见会话。
+        CodexThread(
+            id: id,
+            name: id,
+            preview: "",
+            cwd: url.deletingLastPathComponent().path,
+            createdAt: 1,
+            updatedAt: 2,
+            recencyAt: nil,
+            gitInfo: nil,
+            path: url.path
+        )
+    }
+
+    private func subagentData(id: String, parentID: String) -> Data {
+        // 构造与 Codex rollout 一致的最小子代理 session_meta 行。
+        let line =
+            #"{"timestamp":"2026-07-20T00:00:00Z","type":"session_meta","payload":{"id":"\#(id)","source":{"subagent":{"thread_spawn":{"parent_thread_id":"\#(parentID)"}}}}}"#
+        // 返回 UTF-8 数据，便于测试直接写入 JSONL。
+        return Data(line.utf8)
+    }
+
+    private func applying(
+        _ result: TokenDiscoveryResult,
+        to cache: [String: TokenDiscoveryCacheEntry]
+    ) -> [String: TokenDiscoveryCacheEntry] {
+        // 从上一轮缓存副本开始应用增量。
+        var updated = cache
+        // 先移除已经从完整枚举根目录消失的路径。
+        for path in result.removedCachePaths {
+            updated.removeValue(forKey: path)
+        }
+        // 再写入新增或变化项，使最新属性覆盖旧值。
+        for entry in result.changedCacheEntries {
+            updated[entry.rolloutPath] = entry
+        }
+        // 返回模拟持久化后的完整缓存。
+        return updated
     }
 
     private func decision(

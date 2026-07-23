@@ -1,5 +1,119 @@
 import AppKit
+import CoreServices
 import SwiftUI
+
+final class CodexDataChangeMonitor: @unchecked Sendable {
+    private let codexHomePath: String
+    private let callback: @Sendable () -> Void
+    private let latency: CFTimeInterval
+    private let queue = DispatchQueue(label: "local.nemoob.sessionnest.codex-data-monitor")
+    private var stream: FSEventStreamRef?
+
+    init(
+        codexHome: URL = LocalTokenScanTargetDiscovery.defaultCodexHome(),
+        latency: CFTimeInterval = 1,
+        callback: @escaping @Sendable () -> Void
+    ) {
+        codexHomePath = codexHome.standardizedFileURL.path
+        self.latency = latency
+        self.callback = callback
+    }
+
+    @discardableResult
+    func start() -> Bool {
+        guard stream == nil else { return true }
+        var isDirectory: ObjCBool = false
+        guard
+            FileManager.default.fileExists(
+                atPath: codexHomePath,
+                isDirectory: &isDirectory
+            ),
+            isDirectory.boolValue
+        else { return false }
+
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+        guard
+            let stream = FSEventStreamCreate(
+                kCFAllocatorDefault,
+                { _, info, count, rawPaths, _, _ in
+                    guard let info else { return }
+                    let monitor = Unmanaged<CodexDataChangeMonitor>.fromOpaque(info)
+                        .takeUnretainedValue()
+                    let pathPointers = rawPaths.assumingMemoryBound(
+                        to: UnsafePointer<CChar>?.self
+                    )
+                    let paths = (0..<count).compactMap { index in
+                        pathPointers[index].map(String.init(cString:))
+                    }
+                    monitor.receive(paths)
+                },
+                &context,
+                [codexHomePath] as CFArray,
+                FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+                latency,
+                FSEventStreamCreateFlags(kFSEventStreamCreateFlagWatchRoot)
+            )
+        else { return false }
+
+        FSEventStreamSetDispatchQueue(stream, queue)
+        guard FSEventStreamStart(stream) else {
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            return false
+        }
+        self.stream = stream
+        return true
+    }
+
+    func stop() {
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
+    }
+
+    deinit {
+        stop()
+    }
+
+    static func isRelevantChange(atPath path: String, codexHomePath: String) -> Bool {
+        let home = URL(fileURLWithPath: codexHomePath).standardizedFileURL.path
+        let changed = URL(fileURLWithPath: path).standardizedFileURL.path
+        if changed == home {
+            return true
+        }
+        let homePrefix = home + "/"
+        guard changed.hasPrefix(homePrefix) else { return false }
+        let relativePath = String(changed.dropFirst(homePrefix.count))
+        if relativePath == "sessions" || relativePath.hasPrefix("sessions/") {
+            return true
+        }
+        if relativePath == "archived_sessions"
+            || relativePath.hasPrefix("archived_sessions/")
+        {
+            return true
+        }
+        return !relativePath.contains("/")
+            && relativePath.hasPrefix("state_")
+            && relativePath.contains(".sqlite")
+    }
+
+    private func receive(_ paths: [String]) {
+        guard
+            paths.contains(where: {
+                Self.isRelevantChange(atPath: $0, codexHomePath: codexHomePath)
+            })
+        else { return }
+        callback()
+    }
+}
 
 enum SessionNestLaunchPreference {
     static let opensMainWindowKey = "sessionnest.launch.opensMainWindow"
@@ -31,6 +145,7 @@ final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDel
     private var statusItemController: SessionNestStatusItemController?
     private var mainWindowController: NSWindowController?
     private var updateChecker: AppUpdateChecker?
+    private var codexDataChangeMonitor: CodexDataChangeMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let shouldOpenMainWindow = SessionNestLaunchPreference.shouldOpenMainWindow()
@@ -51,9 +166,6 @@ final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDel
         if shouldOpenMainWindow {
             openMainWindow()
         }
-        Task {
-            await updateChecker.check(.automatic)
-        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -62,7 +174,18 @@ final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDel
 
     func windowWillClose(_ notification: Notification) {
         guard notification.object as? NSWindow === mainWindowController?.window else { return }
+        statusItemController?.setMainWindowVisible(false)
         apply(.closeMainWindow)
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        guard notification.object as? NSWindow === mainWindowController?.window else { return }
+        statusItemController?.setMainWindowVisible(false)
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        guard notification.object as? NSWindow === mainWindowController?.window else { return }
+        statusItemController?.setMainWindowVisible(true)
     }
 
     private func prepareSession() {
@@ -83,10 +206,25 @@ final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDel
             )
             let store = try MetadataStore(databaseURL: databaseURL)
             let client = try CodexClient()
-            model = SessionListModel(client: client, store: store)
+            let model = SessionListModel(
+                client: client,
+                store: store,
+                browsingStateStore: SessionBrowsingStateStore()
+            )
+            self.model = model
+            let monitor = CodexDataChangeMonitor { [weak model] in
+                Task { @MainActor [weak model] in
+                    model?.codexDataDidChange()
+                }
+            }
+            if monitor.start() {
+                model.enableCodexDataChangeMonitoring()
+                codexDataChangeMonitor = monitor
+            }
             startupError = nil
         } catch {
             model = nil
+            codexDataChangeMonitor = nil
             startupError = error.localizedDescription
         }
     }
@@ -98,6 +236,7 @@ final class SessionNestAppDelegate: NSObject, NSApplicationDelegate, NSWindowDel
         mainWindowController = controller
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+        statusItemController?.setMainWindowVisible(true)
         NSApp.activate(ignoringOtherApps: true)
     }
 

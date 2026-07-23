@@ -37,10 +37,16 @@ struct AppVersion: Comparable, Equatable, Sendable {
 
 enum AppUpdateSchedule {
     static let interval: TimeInterval = 24 * 60 * 60
+    static let timerTolerance: TimeInterval = 5 * 60
 
     static func isDue(lastAttempt: Date?, now: Date) -> Bool {
         guard let lastAttempt else { return true }
         return now.timeIntervalSince(lastAttempt) >= interval
+    }
+
+    static func nextCheckDate(lastAttempt: Date?, now: Date) -> Date {
+        guard let lastAttempt else { return now }
+        return max(now, lastAttempt.addingTimeInterval(interval))
     }
 }
 
@@ -186,6 +192,14 @@ final class AppUpdateChecker: ObservableObject {
         automaticallyChecksForUpdates = preferences.automaticallyChecksForUpdates
     }
 
+    var nextAutomaticCheckAt: Date? {
+        guard automaticallyChecksForUpdates else { return nil }
+        return AppUpdateSchedule.nextCheckDate(
+            lastAttempt: preferences.lastAutomaticCheckAt,
+            now: now()
+        )
+    }
+
     static func live(
         bundle: Bundle = .main,
         defaults: UserDefaults = .standard,
@@ -206,8 +220,6 @@ final class AppUpdateChecker: ObservableObject {
     }
 
     func check(_ trigger: AppUpdateCheckTrigger) async {
-        guard !requestInFlight else { return }
-
         let attemptDate = now()
         if trigger == .automatic {
             guard
@@ -219,6 +231,7 @@ final class AppUpdateChecker: ObservableObject {
             else { return }
             preferences.lastAutomaticCheckAt = attemptDate
         }
+        guard !requestInFlight else { return }
 
         requestInFlight = true
         let previousState = state

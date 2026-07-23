@@ -4,7 +4,7 @@ enum DailyTokenUsagePresentation {
     static let chartHeight: CGFloat = 110
     static let barAreaHeight: CGFloat = 62
     static let emptyText = "暂无每日 Token 记录"
-    static let observationCaption = "按本机可读取的 Codex 会话记录统计，不代表服务端额度消耗"
+    static let observationCaption = TokenUsageDefinition.explanation
 
     private static let compactNumberFormat = IntegerFormatStyle<Int64>.number
         .notation(.compactName)
@@ -12,10 +12,31 @@ enum DailyTokenUsagePresentation {
     private static let exactNumberFormat = IntegerFormatStyle<Int64>.number
         .locale(Locale(identifier: "zh-Hans-CN"))
 
-    static func dayDomain(now: Int64, calendar: Calendar) -> [Int64] {
+    static func dayDomain(
+        startingAt: Int64?,
+        now: Int64,
+        calendar: Calendar
+    ) -> [Int64] {
         let today = calendar.startOfDay(
             for: Date(timeIntervalSince1970: TimeInterval(now))
         )
+        if let startingAt {
+            let firstDay = calendar.startOfDay(
+                for: Date(timeIntervalSince1970: TimeInterval(startingAt))
+            )
+            guard firstDay <= today else { return [] }
+
+            // 周额度可能在非零点开始，因此按本地日历推进并保留首个部分日。
+            var days: [Int64] = []
+            var day = firstDay
+            while day <= today {
+                days.append(Int64(day.timeIntervalSince1970))
+                guard let nextDay = calendar.date(byAdding: .day, value: 1, to: day)
+                else { break }
+                day = nextDay
+            }
+            return days
+        }
         return (0..<7).reversed().compactMap { offset in
             calendar.date(byAdding: .day, value: -offset, to: today).map {
                 Int64($0.timeIntervalSince1970)
@@ -85,6 +106,10 @@ enum DailyTokenUsagePresentation {
 }
 
 enum DailyTokenUsageSelection {
+    static func defaultDay(in points: [StatisticsDailyPoint]) -> Int64? {
+        points.max { $0.dayStart < $1.dayStart }?.dayStart
+    }
+
     static func reconcile(
         selectedDay: Int64?,
         in points: [StatisticsDailyPoint]
@@ -96,10 +121,12 @@ enum DailyTokenUsageSelection {
 
 struct DailyTokenUsageChart: View {
     let points: [StatisticsDailyPoint]
+    let startingAt: Int64?
     let now: Int64
     let calendar: Calendar
 
     @State private var selectedDay: Int64?
+    @State private var hasAppliedDefaultSelection = false
 
     private var selectedPoint: StatisticsDailyPoint? {
         guard let selectedDay else { return nil }
@@ -107,7 +134,11 @@ struct DailyTokenUsageChart: View {
     }
 
     private var dayDomain: [Int64] {
-        DailyTokenUsagePresentation.dayDomain(now: now, calendar: calendar)
+        DailyTokenUsagePresentation.dayDomain(
+            startingAt: startingAt,
+            now: now,
+            calendar: calendar
+        )
     }
 
     private var usablePoints: [StatisticsDailyPoint] {
@@ -142,17 +173,32 @@ struct DailyTokenUsageChart: View {
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .onAppear {
+            applyDefaultSelectionIfNeeded()
+        }
         .onChange(of: usablePoints.map(\.dayStart)) {
             selectedDay = DailyTokenUsageSelection.reconcile(
                 selectedDay: selectedDay,
                 in: usablePoints
             )
+            applyDefaultSelectionIfNeeded()
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("每日 Token 消耗")
         .accessibilityAction(named: "清除选择") {
             selectedDay = nil
         }
+    }
+
+    private func applyDefaultSelectionIfNeeded() {
+        guard
+            !hasAppliedDefaultSelection,
+            let defaultDay = DailyTokenUsageSelection.defaultDay(in: usablePoints)
+        else { return }
+
+        // 首次有统计数据时展示最新一天；之后保留用户清除或已有选择。
+        selectedDay = defaultDay
+        hasAppliedDefaultSelection = true
     }
 
     private var chart: some View {
